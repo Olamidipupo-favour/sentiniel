@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible problem in Sentiniel.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the command, target type, and redacted output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sentiniel version
+    validations:
+      required: true

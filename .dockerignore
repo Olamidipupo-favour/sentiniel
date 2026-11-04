@@ -1,0 +1,6 @@
+.git
+.github
+.sentiniel-quarantine
+dist
+sentiniel
+*.test

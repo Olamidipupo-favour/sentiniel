@@ -1,0 +1,18 @@
+name: Detection strategy request
+description: Propose a new detection strategy or target provider.
+title: "[Strategy]: "
+labels: ["enhancement", "strategy"]
+body:
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and threat model
+      description: Explain the observable indicators without sharing live payloads.
+    validations:
+      required: true
+  - type: textarea
+    id: false_positives
+    attributes:
+      label: False-positive considerations
+    validations:
+      required: true
