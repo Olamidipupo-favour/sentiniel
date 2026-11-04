@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -168,15 +169,39 @@ func collectFindings(o options) []sentiniel.Finding {
 			}
 		}
 		var all []sentiniel.Finding
-		for _, repo := range repos {
-			target := sentiniel.GitHubTarget{Client: client, Repo: repo}
-			files, err := target.Files()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
-				continue
-			}
-			all = append(all, scanner.Scan(files, repo)...)
+		if len(repos) == 0 {
+			return all
 		}
+		var mu sync.Mutex
+		jobs := make(chan string)
+		var wg sync.WaitGroup
+		workers := 8
+		if len(repos) < workers {
+			workers = len(repos)
+		}
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for repo := range jobs {
+					target := sentiniel.GitHubTarget{Client: client, Repo: repo}
+					files, err := target.Files()
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
+						continue
+					}
+					findings := scanner.Scan(files, repo)
+					mu.Lock()
+					all = append(all, findings...)
+					mu.Unlock()
+				}
+			}()
+		}
+		for _, repo := range repos {
+			jobs <- repo
+		}
+		close(jobs)
+		wg.Wait()
 		return all
 	}
 	info, err := os.Stat(o.path)

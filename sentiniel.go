@@ -261,7 +261,7 @@ func NewGitHubClient(token string) (*GitHubClient, error) {
 	if token == "" {
 		return nil, errors.New("set GITHUB_TOKEN/GH_TOKEN or authenticate with gh")
 	}
-	return &GitHubClient{Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}}, nil
+	return &GitHubClient{Token: token, HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
 }
 
 func (c *GitHubClient) get(url string, target any) error {
