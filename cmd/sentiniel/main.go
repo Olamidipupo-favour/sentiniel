@@ -172,7 +172,8 @@ func collectFindings(o options) []sentiniel.Finding {
 			target := sentiniel.GitHubTarget{Client: client, Repo: repo}
 			files, err := target.Files()
 			if err != nil {
-				fatal(err.Error())
+				fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
+				continue
 			}
 			all = append(all, scanner.Scan(files, repo)...)
 		}
