@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +34,18 @@ var (
 	stdin   = bufio.NewReader(os.Stdin)
 )
 
+// buildVersion falls back to the module version so `go install ...@vX` is not reported as dev.
+func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return version
+	}
+	return info.Main.Version
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -54,7 +67,7 @@ func main() {
 	case "logout":
 		runLogout()
 	case "version":
-		fmt.Println("sentiniel", version)
+		fmt.Println("sentiniel", buildVersion())
 	default:
 		usage()
 		os.Exit(2)
