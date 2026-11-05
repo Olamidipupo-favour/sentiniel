@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,21 +9,26 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Olamidipupo-favour/sentiniel"
+	"golang.org/x/term"
 )
 
 type options struct {
 	path, repo, owner, strategies, listen, output, findings string
+	exclude, token                                          string
 	format                                                  string
 	mode                                                    sentiniel.Mode
-	recursive, confirm                                      bool
+	recursive, confirm, interactive                         bool
 	failOn                                                  string
 }
+
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -40,8 +46,12 @@ func main() {
 		runSchedule(os.Args[2:])
 	case "webhook":
 		runWebhook(os.Args[2:])
+	case "login":
+		runLogin(os.Args[2:])
+	case "logout":
+		runLogout()
 	case "version":
-		fmt.Println("sentiniel dev")
+		fmt.Println("sentiniel", version)
 	default:
 		usage()
 		os.Exit(2)
@@ -132,6 +142,138 @@ func runCombined(args []string) {
 	printFindings(findings, options{format: "text", mode: sentiniel.Apply})
 }
 
+func runLogin(args []string) {
+	var token string
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	fs.StringVar(&token, "token", "", "GitHub personal access token; prompted for when omitted")
+	fs.Parse(args)
+	if token == "" {
+		fmt.Print("GitHub token (needs repo, and read:org for organizations): ")
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			data, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				fatal(err.Error())
+			}
+			token = string(data)
+		} else {
+			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			token = line
+		}
+	}
+	token = strings.TrimSpace(token)
+	client, err := sentiniel.NewGitHubClient(token)
+	if err != nil {
+		fatal(err.Error())
+	}
+	user, err := client.User()
+	if err != nil {
+		fatal("token rejected: " + err.Error())
+	}
+	if err := sentiniel.SaveToken(token); err != nil {
+		fatal(err.Error())
+	}
+	path, _ := sentiniel.TokenPath()
+	fmt.Printf("Signed in as %s. Token stored in %s\n", user, path)
+}
+
+func runLogout() {
+	if err := sentiniel.RemoveToken(); err != nil {
+		fatal(err.Error())
+	}
+	fmt.Println("Signed out; stored token removed.")
+}
+
+func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Finding {
+	client, err := sentiniel.NewGitHubClient(o.token)
+	if err != nil {
+		fatal(err.Error())
+	}
+	user, err := client.User()
+	if err != nil {
+		fatal(err.Error())
+	}
+	orgs, err := client.Organizations()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sentiniel: warning: cannot list organizations: %v\n", err)
+	}
+	owners := append([]string{user}, orgs...)
+	fmt.Println("Accounts and organizations:")
+	for i, owner := range owners {
+		fmt.Printf("  %d. %s\n", i+1, owner)
+	}
+	choice := prompt(fmt.Sprintf("Select one [1-%d] (default 1): ", len(owners)))
+	index := 0
+	if choice != "" {
+		indices, err := parseSelection(choice, len(owners))
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(indices) != 1 {
+			fatal("select exactly one account or organization")
+		}
+		index = indices[0]
+	}
+	repos, err := client.Repositories(owners[index])
+	if err != nil {
+		fatal(err.Error())
+	}
+	if len(repos) == 0 {
+		fatal("no repositories visible for " + owners[index])
+	}
+	fmt.Printf("Repositories in %s (%d):\n", owners[index], len(repos))
+	for i, repo := range repos {
+		fmt.Printf("  %d. %s\n", i+1, repo)
+	}
+	selection := prompt("Select repositories (comma-separated numbers, 'all', or empty for all): ")
+	indices, err := parseSelection(selection, len(repos))
+	if err != nil {
+		fatal(err.Error())
+	}
+	selected := make([]string, 0, len(indices))
+	for _, i := range indices {
+		selected = append(selected, repos[i])
+	}
+	return scanRepos(client, selected, scanner)
+}
+
+func prompt(label string) string {
+	fmt.Print(label)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func parseSelection(input string, count int) ([]int, error) {
+	input = strings.TrimSpace(strings.ToLower(input))
+	if input == "" || input == "all" {
+		all := make([]int, count)
+		for i := range all {
+			all[i] = i
+		}
+		return all, nil
+	}
+	seen := map[int]bool{}
+	var selected []int
+	for _, part := range strings.Split(input, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 1 || value > count {
+			return nil, fmt.Errorf("invalid selection %q (expected 1-%d)", part, count)
+		}
+		if !seen[value-1] {
+			seen[value-1] = true
+			selected = append(selected, value-1)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no selection made")
+	}
+	return selected, nil
+}
+
 func newScanFlags(o *options) *flag.FlagSet {
 	o.mode = sentiniel.DryRun
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
@@ -141,21 +283,34 @@ func newScanFlags(o *options) *flag.FlagSet {
 	fs.StringVar(&o.strategies, "strategies", "all", "comma-separated strategies: ioc,heuristic,all")
 	fs.StringVar(&o.format, "format", "text", "output format: text or json")
 	fs.StringVar(&o.output, "output", "", "write JSON findings plan to this file")
+	fs.StringVar(&o.exclude, "exclude", "", "comma-separated local relative paths to exclude")
+	fs.StringVar(&o.token, "token", "", "GitHub token for this run (or GITHUB_TOKEN/GH_TOKEN, sentiniel login)")
 	fs.StringVar(&o.failOn, "fail-on", "", "exit nonzero when findings meet severity: low,medium,high")
 	fs.BoolVar(&o.recursive, "recursive", false, "scan immediate child directories as well as --path")
+	fs.BoolVar(&o.interactive, "interactive", false, "choose an account, organization, and repositories interactively")
 	return fs
 }
 
 func collectFindings(o options) []sentiniel.Finding {
+	if o.interactive {
+		if o.path != "" || o.repo != "" || o.owner != "" {
+			fatal("--interactive cannot be combined with --path, --repo, or --owner")
+		}
+		scanner, err := sentiniel.NewScanner(split(o.strategies))
+		if err != nil {
+			fatal(err.Error())
+		}
+		return collectInteractive(o, scanner)
+	}
 	if o.path == "" && o.repo == "" && o.owner == "" {
-		fatal("choose --path, --repo, or --owner")
+		fatal("choose --path, --repo, --owner, or --interactive")
 	}
 	scanner, err := sentiniel.NewScanner(split(o.strategies))
 	if err != nil {
 		fatal(err.Error())
 	}
 	if o.repo != "" || o.owner != "" {
-		client, err := sentiniel.NewGitHubClient("")
+		client, err := sentiniel.NewGitHubClient(o.token)
 		if err != nil {
 			fatal(err.Error())
 		}
@@ -168,41 +323,7 @@ func collectFindings(o options) []sentiniel.Finding {
 				fatal(err.Error())
 			}
 		}
-		var all []sentiniel.Finding
-		if len(repos) == 0 {
-			return all
-		}
-		var mu sync.Mutex
-		jobs := make(chan string)
-		var wg sync.WaitGroup
-		workers := 8
-		if len(repos) < workers {
-			workers = len(repos)
-		}
-		for i := 0; i < workers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for repo := range jobs {
-					target := sentiniel.GitHubTarget{Client: client, Repo: repo}
-					files, err := target.Files()
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
-						continue
-					}
-					findings := scanner.Scan(files, repo)
-					mu.Lock()
-					all = append(all, findings...)
-					mu.Unlock()
-				}
-			}()
-		}
-		for _, repo := range repos {
-			jobs <- repo
-		}
-		close(jobs)
-		wg.Wait()
-		return all
+		return scanRepos(client, repos, scanner)
 	}
 	info, err := os.Stat(o.path)
 	if err != nil {
@@ -210,7 +331,8 @@ func collectFindings(o options) []sentiniel.Finding {
 	}
 	if info.IsDir() && o.recursive {
 		var all []sentiniel.Finding
-		rootFiles, err := (sentiniel.LocalTarget{Root: o.path}).Files()
+		target := sentiniel.LocalTarget{Root: o.path, Excludes: split(o.exclude)}
+		rootFiles, err := target.Files()
 		if err != nil {
 			fatal(err.Error())
 		}
@@ -218,7 +340,7 @@ func collectFindings(o options) []sentiniel.Finding {
 		entries, _ := os.ReadDir(o.path)
 		for _, entry := range entries {
 			if entry.IsDir() && entry.Name() != "machoka" && entry.Name() != ".git" && !strings.HasPrefix(entry.Name(), ".sentiniel-") {
-				files, err := (sentiniel.LocalTarget{Root: filepath.Join(o.path, entry.Name())}).Files()
+				files, err := (sentiniel.LocalTarget{Root: filepath.Join(o.path, entry.Name()), Excludes: split(o.exclude)}).Files()
 				if err != nil {
 					fatal(err.Error())
 				}
@@ -227,11 +349,49 @@ func collectFindings(o options) []sentiniel.Finding {
 		}
 		return all
 	}
-	files, err := (sentiniel.LocalTarget{Root: o.path}).Files()
+	files, err := (sentiniel.LocalTarget{Root: o.path, Excludes: split(o.exclude)}).Files()
 	if err != nil {
 		fatal(err.Error())
 	}
 	return scanner.Scan(files, o.path)
+}
+
+func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentiniel.Scanner) []sentiniel.Finding {
+	var all []sentiniel.Finding
+	if len(repos) == 0 {
+		return all
+	}
+	var mu sync.Mutex
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	workers := 8
+	if len(repos) < workers {
+		workers = len(repos)
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for repo := range jobs {
+				target := sentiniel.GitHubTarget{Client: client, Repo: repo}
+				files, err := target.Files()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
+					continue
+				}
+				findings := scanner.Scan(files, repo)
+				mu.Lock()
+				all = append(all, findings...)
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, repo := range repos {
+		jobs <- repo
+	}
+	close(jobs)
+	wg.Wait()
+	return all
 }
 
 func writeFindings(findings []sentiniel.Finding, o options) error {
@@ -329,12 +489,17 @@ Commands:
   scan      Read-only scan; optionally write a JSON findings plan
   action    Apply a reviewed local findings plan
   run       Chain scan and local action with explicit confirmation
+  login     Store a GitHub token without requiring gh
+  logout    Remove the stored GitHub token
   schedule  Print scheduler integration guidance
   webhook   Serve a read-only POST /scan endpoint
   version   Print the version
 
 Examples:
+  sentiniel login
+  sentiniel scan --interactive
   sentiniel scan --repo OWNER/REPO --format json --output findings.json
+  sentiniel scan --path ./repo --exclude fixtures/infected
   sentiniel action --path ./repo --findings findings.json --confirm
   sentiniel run --path ./repo --output findings.json --apply --confirm`)
 }

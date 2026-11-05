@@ -148,7 +148,10 @@ func (HeuristicStrategy) Match(file File) (Finding, bool) {
 	return Finding{Path: file.Path, Strategy: "heuristic", Severity: "MEDIUM", Reasons: []string{"large api.js contains execution/network indicators and possible obfuscation; manual review required"}, SHA256: hex.EncodeToString(sum[:]), Action: "do not execute; inspect statically and review provenance before changing it"}, true
 }
 
-type LocalTarget struct{ Root string }
+type LocalTarget struct {
+	Root     string
+	Excludes []string
+}
 
 func (t LocalTarget) Files() ([]File, error) {
 	info, err := os.Stat(t.Root)
@@ -174,6 +177,12 @@ func (t LocalTarget) Files() ([]File, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		for _, excluded := range t.Excludes {
+			excluded = strings.Trim(strings.ReplaceAll(excluded, "\\", "/"), "/")
+			if excluded != "" && (rel == excluded || strings.HasPrefix(rel, excluded+"/")) {
+				return nil
+			}
+		}
 		if rel == ".vscode/tasks.json" || filepath.Base(rel) == KnownPayloadName || filepath.Base(rel) == "api.js" {
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -243,25 +252,92 @@ type GitHubClient struct {
 	HTTP  *http.Client
 }
 
+// TokenPath is where `sentiniel login` stores a token without relying on gh.
+func TokenPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "sentiniel", "token"), nil
+}
+
+func LoadToken() (string, error) {
+	path, err := TokenPath()
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func SaveToken(token string) error {
+	path, err := TokenPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(strings.TrimSpace(token)+"\n"), 0600)
+}
+
+func RemoveToken() error {
+	path, err := TokenPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func NewGitHubClient(token string) (*GitHubClient, error) {
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
+	candidates := []string{token, os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN")}
+	if stored, err := LoadToken(); err == nil {
+		candidates = append(candidates, stored)
 	}
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
+	for _, candidate := range candidates {
+		if candidate = strings.TrimSpace(candidate); candidate != "" {
+			return &GitHubClient{Token: candidate, HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+		}
 	}
-	if token == "" {
-		if path, err := exec.LookPath("gh"); err == nil {
-			out, err := exec.Command(path, "auth", "token").Output()
-			if err == nil {
-				token = strings.TrimSpace(string(out))
+	// Legacy fallback: reuse an existing gh session when present.
+	if path, err := exec.LookPath("gh"); err == nil {
+		if out, err := exec.Command(path, "auth", "token").Output(); err == nil {
+			if token = strings.TrimSpace(string(out)); token != "" {
+				return &GitHubClient{Token: token, HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
 			}
 		}
 	}
-	if token == "" {
-		return nil, errors.New("set GITHUB_TOKEN/GH_TOKEN or authenticate with gh")
+	return nil, errors.New("no GitHub token: run `sentiniel login`, set GITHUB_TOKEN/GH_TOKEN, or authenticate with gh")
+}
+
+func (c *GitHubClient) User() (string, error) {
+	var user struct {
+		Login string `json:"login"`
 	}
-	return &GitHubClient{Token: token, HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+	if err := c.get("https://api.github.com/user", &user); err != nil {
+		return "", err
+	}
+	return user.Login, nil
+}
+
+func (c *GitHubClient) Organizations() ([]string, error) {
+	var orgs []struct {
+		Login string `json:"login"`
+	}
+	if err := c.get("https://api.github.com/user/orgs?per_page=100", &orgs); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(orgs))
+	for _, org := range orgs {
+		names = append(names, org.Login)
+	}
+	return names, nil
 }
 
 func (c *GitHubClient) get(url string, target any) error {

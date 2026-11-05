@@ -6,6 +6,8 @@ before:
 builds:
   - id: sentiniel
     main: ./cmd/sentiniel
+    ldflags:
+      - -s -w -X main.version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]

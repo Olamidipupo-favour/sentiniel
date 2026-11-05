@@ -79,6 +79,49 @@ func TestApplyQuarantinesPayloadAndTask(t *testing.T) {
 	}
 }
 
+func TestLocalTargetSkipsExcludedPaths(t *testing.T) {
+	root := t.TempDir()
+	task := []byte(`{"tasks":[{"command":"node ./payload.orc","runOptions":{"runOn":"folderOpen"}}]}`)
+	for _, rel := range []string{".vscode/tasks.json", "fixtures/infected/.vscode/tasks.json"} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, task, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := (LocalTarget{Root: root, Excludes: []string{"fixtures/infected"}}).Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != ".vscode/tasks.json" {
+		t.Fatalf("unexpected files: %#v", files)
+	}
+}
+
+func TestStoredTokenRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	if err := SaveToken("  token-value  "); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "token-value" {
+		t.Fatalf("LoadToken() = %q", got)
+	}
+	if err := RemoveToken(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadToken(); err == nil {
+		t.Fatal("token still present after RemoveToken")
+	}
+}
+
 func TestUnknownStrategyFails(t *testing.T) {
 	if _, err := NewScanner([]string{"fuzzing"}); err == nil {
 		t.Fatal("expected unknown strategy error")

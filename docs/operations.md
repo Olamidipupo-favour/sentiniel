@@ -1,15 +1,35 @@
 # Operations
 
+## Authentication
+
+Remote scans need a GitHub token. Local scans do not. Sign in without `gh`:
+
+```sh
+sentiniel login
+```
+
+Or use `GITHUB_TOKEN` / `GH_TOKEN`, `--token`, or an existing authenticated `gh` session as a
+fallback. Tokens need `repo` for private repositories and `read:org` for organizations. Remove a
+stored token with `sentiniel logout`.
+
 ## Safe workflow
 
 1. Run a JSON dry run and save the output:
 
    ```sh
-   sentiniel scan --owner Olamidipupo-favour --json > findings.json
+   sentiniel scan --owner Olamidipupo-favour --format json > findings.json
    ```
 
    For an organization, replace the owner with the organization login. The authenticated token
-   must be authorized to list and read those repositories.
+   must be authorized to list and read those repositories. Use `--interactive` to pick an owner and
+   repositories instead of typing them:
+
+   ```sh
+   sentiniel scan --interactive --format json --output findings.json
+   ```
+
+   Repositories that GitHub rejects or times out on are printed as warnings and skipped. They are
+   not reported as clean.
 
 2. Isolate any workstation where a payload may have executed. Do not open infected repositories
    in an editor with automatic tasks enabled.
@@ -18,7 +38,7 @@
 4. For local copies, review the plan before applying:
 
    ```sh
-   sentiniel scan --path /repos/project --json
+   sentiniel scan --path /repos/project --format json --output findings.json
    sentiniel action --path /repos/project --findings findings.json --mode apply --confirm
    ```
 

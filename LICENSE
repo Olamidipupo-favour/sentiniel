@@ -1,21 +1,59 @@
-MIT License
+Sentiniel Source-Available License v1.0
+Copyright (c) 2026 Olamidipupo Favour (Agboola Olamidipupo). All rights reserved.
 
-Copyright (c) 2026 Olamidipupo-favour
+This license replaces the earlier MIT license for all versions distributed from the date of this
+change. It is a source-available license, not an open-source license.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Free permitted use
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+You may use, copy, modify, and distribute the Software free of charge for:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+  a. personal, non-commercial use;
+  b. non-commercial research, teaching, and study;
+  c. use by a registered non-profit or charity for its non-commercial activities;
+  d. evaluation of the Software for up to thirty (30) days before commercial use begins.
+
+2. Commercial use requires a paid license
+
+Any commercial or enterprise use requires a separate paid commercial license from the copyright
+holder. Commercial use includes, without limitation:
+
+  a. use by or for a for-profit company, partnership, or other commercial entity;
+  b. use in internal business operations, including internal security or incident-response work;
+  c. use in, or as part of, a product or service that is sold, licensed, or monetised;
+  d. use by a contractor or consultant on behalf of a commercial client.
+
+Contact the copyright holder for commercial terms before starting commercial use.
+
+3. Attribution
+
+Any permitted use, copy, modification, or distribution must keep this notice and clearly credit
+"Sentiniel by Olamidipupo Favour" with a link to
+https://github.com/Olamidipupo-favour/sentiniel. You may not remove or obscure attribution.
+
+4. Contributions
+
+Unless a separate written agreement says otherwise, any contribution you submit is licensed to the
+copyright holder under this license, including the right to relicense it commercially.
+
+5. Trademarks
+
+This license does not grant rights to the Sentiniel name, logo, or other trademarks except for the
+attribution required above.
+
+6. No warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
+OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+7. Termination
+
+Any use that breaches this license terminates your rights immediately. On termination you must stop
+using and distributing the Software and destroy copies you control, except copies retained only as
+required by law.
+
+This document is a license template, not legal advice. Have a qualified lawyer review it before
+relying on it for enforcement or commercial contracting.
