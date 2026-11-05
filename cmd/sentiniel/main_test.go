@@ -1,6 +1,23 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Olamidipupo-favour/sentiniel"
+)
+
+func TestRemediationRoot(t *testing.T) {
+	clone := "/tmp/clones/owner__repo"
+	if got := remediationRoot(sentiniel.Finding{Repository: "owner/repo", Local: clone}, ""); got != clone {
+		t.Fatalf("cloned finding root = %q, want %q", got, clone)
+	}
+	if got := remediationRoot(sentiniel.Finding{Repository: "owner/repo"}, "/repo"); got != "/repo" {
+		t.Fatalf("remote finding root = %q, want /repo", got)
+	}
+	if got := remediationRoot(sentiniel.Finding{Repository: "owner/repo"}, ""); got != "" {
+		t.Fatalf("remote finding without --path root = %q, want empty", got)
+	}
+}
 
 func TestParseSelection(t *testing.T) {
 	cases := []struct {

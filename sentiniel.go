@@ -32,6 +32,7 @@ const (
 
 type Finding struct {
 	Repository string   `json:"repository"`
+	Local      string   `json:"local,omitempty"`
 	Path       string   `json:"path"`
 	Strategy   string   `json:"strategy"`
 	Severity   string   `json:"severity"`

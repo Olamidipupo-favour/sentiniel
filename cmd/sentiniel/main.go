@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
@@ -22,7 +23,7 @@ import (
 
 type options struct {
 	path, repo, owner, strategies, listen, output, findings string
-	exclude, token                                          string
+	exclude, token, clone                                   string
 	format                                                  string
 	mode                                                    sentiniel.Mode
 	recursive, confirm, interactive                         bool
@@ -111,12 +112,12 @@ func runAction(args []string) {
 	if err := json.Unmarshal(data, &findings); err != nil {
 		fatal("findings file must be a JSON array")
 	}
-	target := sentiniel.LocalTarget{Root: o.path}
 	for i := range findings {
-		if findings[i].Repository != "" && findings[i].Repository != o.path {
+		if findings[i].Repository != "" && findings[i].Repository != o.path && findings[i].Local == "" {
 			continue
 		}
-		action, err := target.Remediate(findings[i], o.mode)
+		root := remediationRoot(findings[i], o.path)
+		action, err := sentiniel.LocalTarget{Root: root}.Remediate(findings[i], o.mode)
 		if err != nil {
 			findings[i].Action = "remediation failed: " + err.Error()
 		} else {
@@ -124,6 +125,14 @@ func runAction(args []string) {
 		}
 	}
 	printFindings(findings, options{format: "text", mode: o.mode})
+}
+
+// remediationRoot picks the local copy a finding belongs to, if any.
+func remediationRoot(f sentiniel.Finding, fallback string) string {
+	if f.Local != "" {
+		return f.Local
+	}
+	return fallback
 }
 
 func runCombined(args []string) {
@@ -143,17 +152,23 @@ func runCombined(args []string) {
 	if !apply || !o.confirm {
 		return
 	}
-	if o.path == "" || o.repo != "" || o.owner != "" {
-		fatal("confirmed actions are currently limited to a local --path")
-	}
-	target := sentiniel.LocalTarget{Root: o.path}
+	applied := false
 	for i := range findings {
-		action, err := target.Remediate(findings[i], sentiniel.Apply)
+		root := remediationRoot(findings[i], o.path)
+		if root == "" {
+			findings[i].Action = "skipped: no local copy (use --path or --clone)"
+			continue
+		}
+		action, err := sentiniel.LocalTarget{Root: root}.Remediate(findings[i], sentiniel.Apply)
 		if err != nil {
 			findings[i].Action = "remediation failed: " + err.Error()
 		} else {
 			findings[i].Action = action
+			applied = true
 		}
+	}
+	if !applied && len(findings) > 0 {
+		fatal("confirmed actions need a local repository: pass --path, or --clone DIR with --interactive")
 	}
 	printFindings(findings, options{format: "text", mode: sentiniel.Apply})
 }
@@ -250,7 +265,58 @@ func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Findi
 	for _, i := range indices {
 		selected = append(selected, repos[i])
 	}
-	return scanRepos(client, selected, scanner)
+	if o.clone == "" {
+		return scanRepos(client, selected, scanner)
+	}
+	return scanClones(client.Token, o.clone, selected, scanner)
+}
+
+// scanClones downloads each repository and scans the local copy, so `run --clone` can remediate it.
+func scanClones(token, dir string, repos []string, scanner *sentiniel.Scanner) []sentiniel.Finding {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		fatal(err.Error())
+	}
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		fatal(err.Error())
+	}
+	var all []sentiniel.Finding
+	for _, repo := range repos {
+		dest := filepath.Join(root, strings.ReplaceAll(repo, "/", "__"))
+		if _, err := os.Stat(dest); err == nil {
+			fmt.Fprintf(os.Stderr, "sentiniel: reusing %s\n", dest)
+		} else if err := cloneRepo(token, repo, dest); err != nil {
+			fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
+			continue
+		}
+		files, err := (sentiniel.LocalTarget{Root: dest}).Files()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
+			continue
+		}
+		for _, finding := range scanner.Scan(files, repo) {
+			finding.Local = dest
+			all = append(all, finding)
+		}
+	}
+	return all
+}
+
+func cloneRepo(token, repo, dest string) error {
+	cmd := exec.Command("git", "clone", "--depth", "1", "--no-tags", "https://github.com/"+repo+".git", dest)
+	if token != "" {
+		// Env, not argv, so the token never appears in the process list or in the clone's config.
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=url.https://x-access-token:"+token+"@github.com/.insteadOf",
+			"GIT_CONFIG_VALUE_0=https://github.com/",
+		)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func prompt(label string) string {
@@ -304,10 +370,14 @@ func newScanFlags(o *options) *flag.FlagSet {
 	fs.StringVar(&o.failOn, "fail-on", "", "exit nonzero when findings meet severity: low,medium,high")
 	fs.BoolVar(&o.recursive, "recursive", false, "scan immediate child directories as well as --path")
 	fs.BoolVar(&o.interactive, "interactive", false, "choose an account, organization, and repositories interactively")
+	fs.StringVar(&o.clone, "clone", "", "with --interactive: download selected repositories into DIR, then scan those copies")
 	return fs
 }
 
 func collectFindings(o options) []sentiniel.Finding {
+	if o.clone != "" && !o.interactive {
+		fatal("--clone requires --interactive")
+	}
 	if o.interactive {
 		if o.path != "" || o.repo != "" || o.owner != "" {
 			fatal("--interactive cannot be combined with --path, --repo, or --owner")
@@ -514,6 +584,7 @@ Commands:
 Examples:
   sentiniel login
   sentiniel scan --interactive
+  sentiniel run --interactive --clone ./clones --apply --confirm
   sentiniel scan --repo OWNER/REPO --format json --output findings.json
   sentiniel scan --path ./repo --exclude fixtures/infected
   sentiniel action --path ./repo --findings findings.json --confirm

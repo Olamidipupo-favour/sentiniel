@@ -28,6 +28,13 @@ stored token with `sentiniel logout`.
    sentiniel scan --interactive --format json --output findings.json
    ```
 
+   Remote repositories are read-only, so remediation needs a local copy. Add `--clone DIR` to
+   download the selected repositories, scan them, and then apply changes to those copies:
+
+   ```sh
+   sentiniel run --interactive --clone ~/sentiniel-clones --apply --confirm
+   ```
+
    Repositories that GitHub rejects or times out on are printed as warnings and skipped. They are
    not reported as clean.
 

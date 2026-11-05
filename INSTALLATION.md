@@ -158,6 +158,9 @@ sentiniel scan --path /path/to/repo --format text
 # Interactive account/org/repository picker
 sentiniel scan --interactive
 
+# Pick repositories, download them, then fix the local copies
+sentiniel run --interactive --clone ./clones --apply --confirm
+
 # One remote repository
 sentiniel scan --repo OWNER/REPO --format json --output findings.json
 

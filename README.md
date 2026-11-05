@@ -50,6 +50,7 @@ sentiniel scan --path /path/to/repository
 sentiniel scan --path /path/to/parent-of-repositories --recursive
 sentiniel scan --path . --exclude fixtures/infected --format json
 sentiniel scan --interactive
+sentiniel run --interactive --clone ./clones --apply --confirm
 sentiniel scan --repo OWNER/REPO
 sentiniel scan --owner OWNER
 sentiniel scan --repo OWNER/REPO --strategies ioc,heuristic
@@ -60,7 +61,10 @@ sentiniel run --path /path/to/repository --apply --confirm
 ```
 
 `--interactive` lists the account and organizations visible to the authenticated token, then lets
-you pick one owner and any number of repositories.
+you pick one owner and any number of repositories. Remote scans are read-only, so add
+`--clone DIR` to download the selected repositories and scan those copies; `run --clone DIR
+--apply --confirm` then fixes the local copies and leaves the originals in
+`.sentiniel-quarantine` for review.
 
 ### Safety model
 
