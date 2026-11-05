@@ -67,6 +67,8 @@ func main() {
 		runLogin(os.Args[2:])
 	case "logout":
 		runLogout()
+	case "update":
+		runUpdate(os.Args[2:])
 	case "version":
 		fmt.Println("sentiniel", buildVersion())
 	default:
@@ -607,12 +609,14 @@ Commands:
   run       Chain scan and local action with explicit confirmation
   login     Store a GitHub token without requiring gh
   logout    Remove the stored GitHub token
+  update    Install the latest release
   schedule  Print scheduler integration guidance
   webhook   Serve a read-only POST /scan endpoint
   version   Print the version
 
 Examples:
   sentiniel login
+  sentiniel update
   sentiniel scan --interactive
   sentiniel run --interactive --clone ./clones --apply --confirm
   sentiniel run --owner OWNER --apply --confirm --force-remote

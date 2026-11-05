@@ -170,8 +170,11 @@ sentiniel scan --owner OWNER --format json --output findings.json
 
 ## 7. Upgrade and uninstall
 
-- Binaries: download the newer release and replace the old file.
-- Go install: rerun `go install ...@latest`.
+- **Any prebuilt binary or `go install` build:** run `sentiniel update`. It reads the latest
+  GitHub release, downloads your platform's archive, verifies it against `checksums.txt`, and
+  replaces the running binary. Use `sentiniel update --check` to see versions without installing,
+  or `--force` to reinstall the current version.
+- Downloading by hand still works: replace the old file with the new archive's binary.
 - Docker: rebuild the image.
 - Uninstall: delete the binary and `sentiniel logout` to remove the stored token.
 
