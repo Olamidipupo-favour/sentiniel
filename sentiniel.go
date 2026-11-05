@@ -362,7 +362,9 @@ func (c *GitHubClient) do(method, url string, body, target any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -386,6 +388,31 @@ func (c *GitHubClient) do(method, url string, body, target any) error {
 		return nil
 	}
 	return json.NewDecoder(res.Body).Decode(target)
+}
+
+// ReleaseAsset is one downloadable file attached to a release.
+type ReleaseAsset struct {
+	Name string
+	URL  string
+}
+
+// LatestRelease reports the newest published tag and its assets. It works without a token.
+func (c *GitHubClient) LatestRelease() (string, []ReleaseAsset, error) {
+	var rel struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := c.get("https://api.github.com/repos/Olamidipupo-favour/sentiniel/releases/latest", &rel); err != nil {
+		return "", nil, err
+	}
+	assets := make([]ReleaseAsset, 0, len(rel.Assets))
+	for _, asset := range rel.Assets {
+		assets = append(assets, ReleaseAsset{Name: asset.Name, URL: asset.URL})
+	}
+	return rel.TagName, assets, nil
 }
 
 func (c *GitHubClient) DefaultBranch(repo string) (string, error) {

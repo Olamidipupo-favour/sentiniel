@@ -2,3 +2,5 @@
 /dist/
 /.sentiniel-quarantine/
 /coverage.out
+config.bat
+node_modules
