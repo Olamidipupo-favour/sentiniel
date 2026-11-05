@@ -60,11 +60,17 @@ sentiniel action --path /path/to/repository --findings findings.json --mode appl
 sentiniel run --path /path/to/repository --apply --confirm
 ```
 
-`--interactive` lists the account and organizations visible to the authenticated token, then lets
-you pick one owner and any number of repositories. Remote scans are read-only, so add
+`--interactive` lists the account and organizations visible to the authenticated token, lets you
+pick one or more owners, then any number of their repositories. Remote scans are read-only, so add
 `--clone DIR` to download the selected repositories and scan those copies; `run --clone DIR
 --apply --confirm` then fixes the local copies and leaves the originals in
 `.sentiniel-quarantine` for review.
+
+Remote repositories are never modified unless you ask twice. `--force-remote --apply --confirm`
+writes directly to the default branch instead: it commits the original to
+`.sentiniel-quarantine/<path>`, then removes the payload or rewrites `.vscode/tasks.json`. Each fix
+is a commit on your default branch, so branch protection and reviews still apply where configured.
+Prefer `--clone` when you can.
 
 ### Safety model
 

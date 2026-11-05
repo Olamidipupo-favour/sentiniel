@@ -1,8 +1,14 @@
 package sentiniel
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -140,5 +146,121 @@ func TestDecodeGitHubContentUsesStandardBase64(t *testing.T) {
 	got, err := decodeGitHubContent("aGVs\nbG8=")
 	if err != nil || string(got) != "hello" {
 		t.Fatalf("got %q, err %v", got, err)
+	}
+}
+
+// fakeGitHub answers API calls in memory so remote remediation can be tested without network access.
+const (
+	testPutSHA    = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testDeleteSHA = "dddddddddddddddddddddddddddddddddddddddd"
+)
+
+type fakeGitHub struct {
+	files    map[string][]byte
+	sha      map[string]string
+	requests []string
+	deleted  string
+	written  map[string][]byte
+}
+
+func (f *fakeGitHub) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.requests = append(f.requests, req.Method+" "+req.URL.Path)
+	if req.URL.Path == "/repos/o/r" {
+		return jsonResponse(`{"default_branch":"main"}`), nil
+	}
+	path := strings.TrimPrefix(req.URL.Path, "/repos/o/r/contents/")
+	switch req.Method {
+	case http.MethodGet:
+		data, ok := f.files[path]
+		if !ok {
+			return jsonStatus(http.StatusNotFound, `{"message":"Not Found"}`), nil
+		}
+		return jsonResponse(`{"sha":"` + f.sha[path] + `","size":` + strconv.Itoa(len(data)) + `,"content":"` + base64.StdEncoding.EncodeToString(data) + `"}`), nil
+	case http.MethodPut:
+		var body struct {
+			Content string `json:"content"`
+			Message string `json:"message"`
+		}
+		json.NewDecoder(req.Body).Decode(&body)
+		data, _ := base64.StdEncoding.DecodeString(body.Content)
+		if f.written == nil {
+			f.written = map[string][]byte{}
+		}
+		f.written[path] = data
+		return jsonResponse(`{"commit":{"sha":"` + testPutSHA + `"}}`), nil
+	case http.MethodDelete:
+		f.deleted = path
+		return jsonResponse(`{"commit":{"sha":"` + testDeleteSHA + `"}}`), nil
+	}
+	return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+}
+
+func jsonResponse(body string) *http.Response {
+	return jsonStatus(http.StatusOK, body)
+}
+
+func jsonStatus(code int, body string) *http.Response {
+	return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}
+}
+
+func TestRemoteRemediateDeletesPayloadAndPreservesOriginal(t *testing.T) {
+	payload := []byte("obfuscated payload")
+	fake := &fakeGitHub{
+		files: map[string][]byte{KnownPayloadPath: payload},
+		sha:   map[string]string{KnownPayloadPath: "blob-sha"},
+	}
+	target := GitHubTarget{Client: &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}, Repo: "o/r"}
+	message, err := target.Remediate(Finding{Repository: "o/r", Path: KnownPayloadPath, Strategy: "ioc"}, Apply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(message, testDeleteSHA[:7]) {
+		t.Fatalf("message = %q, want the commit SHA", message)
+	}
+	if fake.deleted != KnownPayloadPath {
+		t.Fatalf("deleted %q, want %q", fake.deleted, KnownPayloadPath)
+	}
+	if got := fake.written[".sentiniel-quarantine/"+KnownPayloadPath]; string(got) != string(payload) {
+		t.Fatalf("quarantine copy = %q, want the original payload", got)
+	}
+}
+
+func TestRemoteRemediateStripsFolderOpenTask(t *testing.T) {
+	task := `{"version":"2.0.0","tasks":[` +
+		`{"label":"sync","command":"git fetch"},` +
+		`{"label":"fonts","command":"node ./` + KnownPayloadPath + `","runOptions":{"runOn":"folderOpen"}}]}`
+	fake := &fakeGitHub{
+		files: map[string][]byte{".vscode/tasks.json": []byte(task)},
+		sha:   map[string]string{".vscode/tasks.json": "task-sha"},
+	}
+	target := GitHubTarget{Client: &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}, Repo: "o/r"}
+	if _, err := target.Remediate(Finding{Repository: "o/r", Path: ".vscode/tasks.json", Strategy: "ioc"}, Apply); err != nil {
+		t.Fatal(err)
+	}
+	written := string(fake.written[".vscode/tasks.json"])
+	if strings.Contains(written, "folderOpen") || strings.Contains(written, KnownPayloadPath) {
+		t.Fatalf("task file still has the payload task: %s", written)
+	}
+	if !strings.Contains(written, "git fetch") {
+		t.Fatalf("task file lost an unrelated task: %s", written)
+	}
+	if fake.deleted != "" {
+		t.Fatalf("task remediation deleted %q instead of updating it", fake.deleted)
+	}
+}
+
+func TestRemoteRemediateRequiresApplyAndIOC(t *testing.T) {
+	fake := &fakeGitHub{}
+	target := GitHubTarget{Client: &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}, Repo: "o/r"}
+	message, err := target.Remediate(Finding{Repository: "o/r", Path: KnownPayloadPath, Strategy: "ioc"}, DryRun)
+	if err != nil || !strings.Contains(message, "dry-run") {
+		t.Fatalf("dry-run = %q, %v", message, err)
+	}
+	message, err = target.Remediate(Finding{Repository: "o/r", Path: "api.js", Strategy: "heuristic"}, Apply)
+	if err != nil || !strings.Contains(message, "manual remediation") {
+		t.Fatalf("heuristic = %q, %v", message, err)
+	}
+	if len(fake.requests) != 0 {
+		t.Fatalf("dry-run made %d API requests: %v", len(fake.requests), fake.requests)
 	}
 }

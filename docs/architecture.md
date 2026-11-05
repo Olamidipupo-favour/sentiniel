@@ -9,8 +9,10 @@ Sentiniel separates four concerns:
    Contents/tree APIs.
 3. **Strategies** inspect immutable `sentiniel.File` values. Each strategy returns evidence,
    severity, and a suggested action. The current registry contains `ioc` and `heuristic`.
-4. **Remediation** is target-specific and explicit. Local remediation is opt-in and preserves
-   originals in `.sentiniel-quarantine`; GitHub scanning is read-only in this release.
+4. **Remediation** is target-specific and explicit. Both local and remote remediation preserve
+   originals in `.sentiniel-quarantine`, skip advisory findings, and run only after confirmation.
+   Remote writes need `--force-remote` and become commits on the default branch; without it,
+   GitHub access stays read-only.
 
 The CLI keeps these phases separate:
 

@@ -26,7 +26,7 @@ type options struct {
 	exclude, token, clone                                   string
 	format                                                  string
 	mode                                                    sentiniel.Mode
-	recursive, confirm, interactive                         bool
+	recursive, confirm, interactive, forceRemote            bool
 	failOn                                                  string
 }
 
@@ -97,9 +97,10 @@ func runAction(args []string) {
 	fs.StringVar(&o.findings, "findings", "", "JSON findings file produced by scan")
 	fs.StringVar((*string)(&o.mode), "mode", string(sentiniel.DryRun), "action mode: dry-run or apply")
 	fs.BoolVar(&o.confirm, "confirm", false, "confirm remediation")
+	fs.BoolVar(&o.forceRemote, "force-remote", false, "write fixes to remote repositories directly")
 	fs.Parse(args)
-	if o.path == "" || o.findings == "" {
-		fatal("action requires --path and --findings")
+	if o.findings == "" || (o.path == "" && !o.forceRemote) {
+		fatal("action requires --findings and either --path or --force-remote")
 	}
 	if o.mode == sentiniel.Apply && !o.confirm {
 		fatal("apply action is gated; pass --confirm after reviewing the findings plan")
@@ -112,18 +113,8 @@ func runAction(args []string) {
 	if err := json.Unmarshal(data, &findings); err != nil {
 		fatal("findings file must be a JSON array")
 	}
-	for i := range findings {
-		if findings[i].Repository != "" && findings[i].Repository != o.path && findings[i].Local == "" {
-			continue
-		}
-		root := remediationRoot(findings[i], o.path)
-		action, err := sentiniel.LocalTarget{Root: root}.Remediate(findings[i], o.mode)
-		if err != nil {
-			findings[i].Action = "remediation failed: " + err.Error()
-		} else {
-			findings[i].Action = action
-		}
-	}
+	client := remoteClient(o)
+	remediateAll(findings, o.path, client, o.mode)
 	printFindings(findings, options{format: "text", mode: o.mode})
 }
 
@@ -135,13 +126,58 @@ func remediationRoot(f sentiniel.Finding, fallback string) string {
 	return fallback
 }
 
+// remoteClient returns a GitHub client only when a remote write was explicitly requested.
+func remoteClient(o options) *sentiniel.GitHubClient {
+	if !o.forceRemote {
+		return nil
+	}
+	if !o.confirm {
+		fatal("--force-remote writes to remote repositories; pass --confirm")
+	}
+	client, err := sentiniel.NewGitHubClient(o.token)
+	if err != nil {
+		fatal(err.Error())
+	}
+	return client
+}
+
+// remediateAll fixes each finding in the local copy it belongs to, or on the remote repository when
+// --force-remote supplied a client. A finding with no target is reported, never silently dropped.
+func remediateAll(findings []sentiniel.Finding, path string, client *sentiniel.GitHubClient, mode sentiniel.Mode) (local, remote bool) {
+	for i := range findings {
+		var action string
+		var err error
+		root := remediationRoot(findings[i], path)
+		switch {
+		case root != "":
+			action, err = sentiniel.LocalTarget{Root: root}.Remediate(findings[i], mode)
+			local = true
+		case client != nil && strings.Contains(findings[i].Repository, "/"):
+			action, err = (sentiniel.GitHubTarget{Client: client, Repo: findings[i].Repository}).Remediate(findings[i], mode)
+			remote = true
+		default:
+			findings[i].Action = "skipped: no local copy; use --path or --clone, or --force-remote for a remote write"
+			continue
+		}
+		if err != nil {
+			findings[i].Action = "remediation failed: " + err.Error()
+		} else {
+			findings[i].Action = action
+		}
+	}
+	return local, remote
+}
+
 func runCombined(args []string) {
 	var o options
 	var apply bool
 	fs := newScanFlags(&o)
 	fs.BoolVar(&o.confirm, "confirm", false, "confirm remediation")
-	fs.BoolVar(&apply, "apply", false, "enable local remediation after scan")
+	fs.BoolVar(&apply, "apply", false, "enable remediation after scan")
 	fs.Parse(args)
+	if o.forceRemote && !o.confirm {
+		fatal("--force-remote writes to remote repositories; pass --confirm after reviewing the findings")
+	}
 	findings := collectFindings(o)
 	if o.output != "" {
 		if err := writeFindings(findings, o); err != nil {
@@ -152,23 +188,9 @@ func runCombined(args []string) {
 	if !apply || !o.confirm {
 		return
 	}
-	applied := false
-	for i := range findings {
-		root := remediationRoot(findings[i], o.path)
-		if root == "" {
-			findings[i].Action = "skipped: no local copy (use --path or --clone)"
-			continue
-		}
-		action, err := sentiniel.LocalTarget{Root: root}.Remediate(findings[i], sentiniel.Apply)
-		if err != nil {
-			findings[i].Action = "remediation failed: " + err.Error()
-		} else {
-			findings[i].Action = action
-			applied = true
-		}
-	}
-	if !applied && len(findings) > 0 {
-		fatal("confirmed actions need a local repository: pass --path, or --clone DIR with --interactive")
+	local, remote := remediateAll(findings, o.path, remoteClient(o), sentiniel.Apply)
+	if !local && !remote && len(findings) > 0 {
+		fatal("confirmed actions need a target: pass --path, --clone DIR with --interactive, or --force-remote")
 	}
 	printFindings(findings, options{format: "text", mode: sentiniel.Apply})
 }
@@ -233,26 +255,33 @@ func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Findi
 	for i, owner := range owners {
 		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, owner)
 	}
-	choice := prompt(fmt.Sprintf("Select one [1-%d] (default 1): ", len(owners)))
-	index := 0
+	choice := prompt(fmt.Sprintf("Select owners [1-%d] (comma-separated, 'all', or empty for 1): ", len(owners)))
+	ownerIndices := []int{0}
 	if choice != "" {
-		indices, err := parseSelection(choice, len(owners))
+		ownerIndices, err = parseSelection(choice, len(owners))
 		if err != nil {
 			fatal(err.Error())
 		}
-		if len(indices) != 1 {
-			fatal("select exactly one account or organization")
-		}
-		index = indices[0]
 	}
-	repos, err := client.Repositories(owners[index])
-	if err != nil {
-		fatal(err.Error())
+	repos := []string{}
+	seenRepo := map[string]bool{}
+	for _, index := range ownerIndices {
+		ownerRepos, err := client.Repositories(owners[index])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sentiniel: warning: cannot list %s: %v\n", owners[index], err)
+			continue
+		}
+		for _, repo := range ownerRepos {
+			if !seenRepo[repo] {
+				seenRepo[repo] = true
+				repos = append(repos, repo)
+			}
+		}
 	}
 	if len(repos) == 0 {
-		fatal("no repositories visible for " + owners[index])
+		fatal("no repositories visible for the selected owners")
 	}
-	fmt.Fprintf(os.Stderr, "Repositories in %s (%d):\n", owners[index], len(repos))
+	fmt.Fprintf(os.Stderr, "Repositories in %d owner(s) (%d):\n", len(ownerIndices), len(repos))
 	for i, repo := range repos {
 		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, repo)
 	}
@@ -371,6 +400,7 @@ func newScanFlags(o *options) *flag.FlagSet {
 	fs.BoolVar(&o.recursive, "recursive", false, "scan immediate child directories as well as --path")
 	fs.BoolVar(&o.interactive, "interactive", false, "choose an account, organization, and repositories interactively")
 	fs.StringVar(&o.clone, "clone", "", "with --interactive: download selected repositories into DIR, then scan those copies")
+	fs.BoolVar(&o.forceRemote, "force-remote", false, "with --apply --confirm: write fixes to remote repositories directly")
 	return fs
 }
 
@@ -573,7 +603,7 @@ func usage() {
 
 Commands:
   scan      Read-only scan; optionally write a JSON findings plan
-  action    Apply a reviewed local findings plan
+  action    Apply a reviewed local or remote findings plan
   run       Chain scan and local action with explicit confirmation
   login     Store a GitHub token without requiring gh
   logout    Remove the stored GitHub token
@@ -585,6 +615,7 @@ Examples:
   sentiniel login
   sentiniel scan --interactive
   sentiniel run --interactive --clone ./clones --apply --confirm
+  sentiniel run --owner OWNER --apply --confirm --force-remote
   sentiniel scan --repo OWNER/REPO --format json --output findings.json
   sentiniel scan --path ./repo --exclude fixtures/infected
   sentiniel action --path ./repo --findings findings.json --confirm

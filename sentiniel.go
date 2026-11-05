@@ -1,13 +1,16 @@
 package sentiniel
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -342,21 +345,189 @@ func (c *GitHubClient) Organizations() ([]string, error) {
 }
 
 func (c *GitHubClient) get(url string, target any) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	return c.do(http.MethodGet, url, nil, target)
+}
+
+// do performs an authenticated API call. The response body is read for the API message on failure.
+func (c *GitHubClient) do(method, url string, body, target any) error {
+	var payload io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		payload = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, url, payload)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
 	if res.StatusCode >= 300 {
+		var apiErr struct {
+			Message string `json:"message"`
+		}
+		json.NewDecoder(io.LimitReader(res.Body, 2048)).Decode(&apiErr)
+		if apiErr.Message != "" {
+			return fmt.Errorf("GitHub API %s: %s", res.Status, apiErr.Message)
+		}
 		return fmt.Errorf("GitHub API %s: %s", res.Status, url)
 	}
+	if target == nil {
+		return nil
+	}
 	return json.NewDecoder(res.Body).Decode(target)
+}
+
+func (c *GitHubClient) DefaultBranch(repo string) (string, error) {
+	var info struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := c.get("https://api.github.com/repos/"+repo, &info); err != nil {
+		return "", err
+	}
+	if info.DefaultBranch == "" {
+		return "", errors.New("repository has no default branch")
+	}
+	return info.DefaultBranch, nil
+}
+
+type remoteFile struct {
+	SHA  string
+	Data []byte
+}
+
+func escapePath(path string) string {
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func (c *GitHubClient) file(repo, path, branch string) (remoteFile, error) {
+	var out struct {
+		SHA     string `json:"sha"`
+		Content string `json:"content"`
+		Size    int    `json:"size"`
+	}
+	u := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s?ref=%s", repo, escapePath(path), url.QueryEscape(branch))
+	if err := c.get(u, &out); err != nil {
+		return remoteFile{}, err
+	}
+	if out.Content == "" && out.Size > 0 {
+		return remoteFile{}, fmt.Errorf("%s is too large for the contents API", path)
+	}
+	data, err := decodeGitHubContent(out.Content)
+	if err != nil {
+		return remoteFile{}, err
+	}
+	return remoteFile{SHA: out.SHA, Data: data}, nil
+}
+
+// putFile writes a file and returns the commit SHA. A non-empty sha updates an existing blob.
+func (c *GitHubClient) putFile(repo, path, branch, message string, data []byte, sha string) (string, error) {
+	body := map[string]string{
+		"message": message,
+		"content": base64.StdEncoding.EncodeToString(data),
+		"branch":  branch,
+	}
+	if sha != "" {
+		body["sha"] = sha
+	}
+	var out struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	u := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repo, escapePath(path))
+	if err := c.do(http.MethodPut, u, body, &out); err != nil {
+		return "", err
+	}
+	return out.Commit.SHA, nil
+}
+
+func (c *GitHubClient) deleteFile(repo, path, branch, message, sha string) (string, error) {
+	var out struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	body := map[string]string{"message": message, "branch": branch, "sha": sha}
+	u := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repo, escapePath(path))
+	if err := c.do(http.MethodDelete, u, body, &out); err != nil {
+		return "", err
+	}
+	return out.Commit.SHA, nil
+}
+
+// Remediate fixes a finding directly on the remote default branch. It is only called after explicit
+// user confirmation, keeps a copy under .sentiniel-quarantine, and never touches advisory findings.
+func (t GitHubTarget) Remediate(f Finding, mode Mode) (string, error) {
+	if mode == DryRun {
+		return "dry-run: no remote changes", nil
+	}
+	if f.Strategy != "ioc" {
+		return "manual remediation required for advisory finding; no remote changes", nil
+	}
+	branch, err := t.Client.DefaultBranch(t.Repo)
+	if err != nil {
+		return "", err
+	}
+	original, err := t.Client.file(t.Repo, f.Path, branch)
+	if err != nil {
+		return "", err
+	}
+	quarantine := ".sentiniel-quarantine/" + f.Path
+	if _, err := t.Client.file(t.Repo, quarantine, branch); err != nil {
+		if _, err := t.Client.putFile(t.Repo, quarantine, branch, "sentiniel: preserve "+f.Path, original.Data, ""); err != nil {
+			return "", fmt.Errorf("preserve original: %w", err)
+		}
+	}
+	if f.Path == ".vscode/tasks.json" {
+		var tasks TaskFile
+		if err := json.Unmarshal(original.Data, &tasks); err != nil {
+			return "", err
+		}
+		filtered := tasks.Tasks[:0]
+		for _, task := range tasks.Tasks {
+			if !(strings.Contains(task.Command, KnownPayloadPath) ||
+				(task.RunOptions.RunOn == "folderOpen" && strings.Contains(task.Command, ".orc"))) {
+				filtered = append(filtered, task)
+			}
+		}
+		tasks.Tasks = filtered
+		out, err := json.MarshalIndent(tasks, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		sha, err := t.Client.putFile(t.Repo, f.Path, branch, "sentiniel: remove folder-open payload task", append(out, '\n'), original.SHA)
+		if err != nil {
+			return "", err
+		}
+		return "removed remote folder-open task; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
+	}
+	sha, err := t.Client.deleteFile(t.Repo, f.Path, branch, "sentiniel: remove known payload file", original.SHA)
+	if err != nil {
+		return "", err
+	}
+	return "removed remote suspicious file; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 func (c *GitHubClient) Repositories(owner string) ([]string, error) {
@@ -422,10 +593,8 @@ func contains(values []string, value string) bool {
 }
 
 func (t GitHubTarget) Files() ([]File, error) {
-	var repo struct {
-		DefaultBranch string `json:"default_branch"`
-	}
-	if err := t.Client.get("https://api.github.com/repos/"+t.Repo, &repo); err != nil {
+	branch, err := t.Client.DefaultBranch(t.Repo)
+	if err != nil {
 		return nil, err
 	}
 	var tree struct {
@@ -435,7 +604,7 @@ func (t GitHubTarget) Files() ([]File, error) {
 			URL  string `json:"url"`
 		} `json:"tree"`
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/git/trees/%s?recursive=1", t.Repo, repo.DefaultBranch)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/git/trees/%s?recursive=1", t.Repo, url.QueryEscape(branch))
 	if err := t.Client.get(url, &tree); err != nil {
 		return nil, err
 	}

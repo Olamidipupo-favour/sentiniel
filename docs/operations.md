@@ -35,6 +35,17 @@ stored token with `sentiniel logout`.
    sentiniel run --interactive --clone ~/sentiniel-clones --apply --confirm
    ```
 
+   If cloning is impractical, `--force-remote` writes to the default branch instead. It requires
+   `--confirm`, commits the original to `.sentiniel-quarantine/<path>` before changing anything,
+   skips advisory findings, and refuses to run without a token that can push:
+
+   ```sh
+   sentiniel run --owner YOUR_ACCOUNT --apply --confirm --force-remote
+   ```
+
+   Every remote fix is a commit on the default branch. Prefer `--clone` and a pull request when the
+   repository has branch protection or reviewers.
+
    Repositories that GitHub rejects or times out on are printed as warnings and skipped. They are
    not reported as clean.
 
