@@ -28,7 +28,10 @@ type options struct {
 	failOn                                                  string
 }
 
-var version = "dev"
+var (
+	version = "dev"
+	stdin   = bufio.NewReader(os.Stdin)
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -157,7 +160,7 @@ func runLogin(args []string) {
 			}
 			token = string(data)
 		} else {
-			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			line, _ := stdin.ReadString('\n')
 			token = line
 		}
 	}
@@ -198,9 +201,9 @@ func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Findi
 		fmt.Fprintf(os.Stderr, "sentiniel: warning: cannot list organizations: %v\n", err)
 	}
 	owners := append([]string{user}, orgs...)
-	fmt.Println("Accounts and organizations:")
+	fmt.Fprintln(os.Stderr, "Accounts and organizations:")
 	for i, owner := range owners {
-		fmt.Printf("  %d. %s\n", i+1, owner)
+		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, owner)
 	}
 	choice := prompt(fmt.Sprintf("Select one [1-%d] (default 1): ", len(owners)))
 	index := 0
@@ -221,9 +224,9 @@ func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Findi
 	if len(repos) == 0 {
 		fatal("no repositories visible for " + owners[index])
 	}
-	fmt.Printf("Repositories in %s (%d):\n", owners[index], len(repos))
+	fmt.Fprintf(os.Stderr, "Repositories in %s (%d):\n", owners[index], len(repos))
 	for i, repo := range repos {
-		fmt.Printf("  %d. %s\n", i+1, repo)
+		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, repo)
 	}
 	selection := prompt("Select repositories (comma-separated numbers, 'all', or empty for all): ")
 	indices, err := parseSelection(selection, len(repos))
@@ -238,8 +241,8 @@ func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Findi
 }
 
 func prompt(label string) string {
-	fmt.Print(label)
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Fprint(os.Stderr, label)
+	line, _ := stdin.ReadString('\n')
 	return strings.TrimSpace(line)
 }
 
