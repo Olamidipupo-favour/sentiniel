@@ -70,6 +70,7 @@ sentiniel scan --interactive
 sentiniel run --interactive --clone ./clones --apply --confirm
 sentiniel scan --repo OWNER/REPO
 sentiniel scan --owner OWNER
+sentiniel scan --owner OWNER --all-branches
 sentiniel scan --repo OWNER/REPO --strategies ioc,heuristic
 sentiniel scan --repo OWNER/REPO --format json --output findings.json
 sentiniel action --path /path/to/repository --findings findings.json --mode dry-run
@@ -82,6 +83,10 @@ pick one or more owners, then any number of their repositories. Remote scans are
 `--clone DIR` to download the selected repositories and scan those copies; `run --clone DIR
 --apply --confirm` then fixes the local copies and leaves the originals in
 `.sentiniel-quarantine` for review.
+
+Remote scans read the default branch. Add `--all-branches` to scan every branch, which matters when
+a worm can push to a branch you do not deploy from. Findings then record the branch, and
+`action --force-remote` writes the fix to that branch.
 
 Remote repositories are never modified unless you ask twice. `--force-remote --apply --confirm`
 writes directly to the default branch instead: it commits the original to

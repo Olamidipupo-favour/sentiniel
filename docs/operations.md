@@ -51,6 +51,10 @@ stored token with `sentiniel logout`.
    repository has branch protection or reviewers. `--exclude` also applies to remote paths, which
    keeps a repository's own malicious-looking fixture from being rewritten.
 
+   Remote scans read the default branch. Add `--all-branches` when a repository has branches that
+   matter, because a worm can commit to `develop` and never touch the branch you deploy from. The
+   branch is recorded on each finding and `--force-remote` writes back to it.
+
    Repositories that GitHub rejects or times out on are printed as warnings and skipped. They are
    not reported as clean.
 

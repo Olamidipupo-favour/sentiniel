@@ -22,12 +22,12 @@ import (
 )
 
 type options struct {
-	path, repo, owner, strategies, listen, output, findings string
-	exclude, token, clone                                   string
-	format                                                  string
-	mode                                                    sentiniel.Mode
-	recursive, confirm, interactive, forceRemote            bool
-	failOn                                                  string
+	path, repo, owner, strategies, listen, output, findings   string
+	exclude, token, clone                                     string
+	format                                                    string
+	mode                                                      sentiniel.Mode
+	recursive, confirm, interactive, forceRemote, allBranches bool
+	failOn                                                    string
 }
 
 var (
@@ -156,7 +156,7 @@ func remediateAll(findings []sentiniel.Finding, path string, client *sentiniel.G
 			action, err = sentiniel.LocalTarget{Root: root, Excludes: excludes}.Remediate(findings[i], mode)
 			local = true
 		case client != nil && strings.Contains(findings[i].Repository, "/"):
-			action, err = (sentiniel.GitHubTarget{Client: client, Repo: findings[i].Repository, Excludes: excludes}).Remediate(findings[i], mode)
+			action, err = (sentiniel.GitHubTarget{Client: client, Repo: findings[i].Repository, Branch: findings[i].Branch, Excludes: excludes}).Remediate(findings[i], mode)
 			remote = true
 		default:
 			findings[i].Action = "skipped: no local copy; use --path or --clone, or --force-remote for a remote write"
@@ -301,7 +301,7 @@ func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Findi
 		selected = append(selected, repos[i])
 	}
 	if o.clone == "" {
-		return scanRepos(client, selected, scanner, split(o.exclude))
+		return scanRepos(client, selected, scanner, split(o.exclude), o.allBranches)
 	}
 	return scanClones(client.Token, o.clone, selected, scanner, split(o.exclude))
 }
@@ -407,6 +407,7 @@ func newScanFlags(o *options) *flag.FlagSet {
 	fs.BoolVar(&o.interactive, "interactive", false, "choose an account, organization, and repositories interactively")
 	fs.StringVar(&o.clone, "clone", "", "with --interactive: download selected repositories into DIR, then scan those copies")
 	fs.BoolVar(&o.forceRemote, "force-remote", false, "with --apply --confirm: write fixes to remote repositories directly")
+	fs.BoolVar(&o.allBranches, "all-branches", false, "scan every branch of each remote repository, not only the default branch")
 	return fs
 }
 
@@ -445,7 +446,7 @@ func collectFindings(o options) []sentiniel.Finding {
 				fatal(err.Error())
 			}
 		}
-		return scanRepos(client, repos, scanner, split(o.exclude))
+		return scanRepos(client, repos, scanner, split(o.exclude), o.allBranches)
 	}
 	info, err := os.Stat(o.path)
 	if err != nil {
@@ -478,7 +479,7 @@ func collectFindings(o options) []sentiniel.Finding {
 	return scanner.Scan(files, o.path)
 }
 
-func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentiniel.Scanner, excludes []string) []sentiniel.Finding {
+func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentiniel.Scanner, excludes []string, allBranches bool) []sentiniel.Finding {
 	var all []sentiniel.Finding
 	if len(repos) == 0 {
 		return all
@@ -495,16 +496,30 @@ func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentinie
 		go func() {
 			defer wg.Done()
 			for repo := range jobs {
-				target := sentiniel.GitHubTarget{Client: client, Repo: repo, Excludes: excludes}
-				files, err := target.Files()
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
-					continue
+				branches := []string{""}
+				if allBranches {
+					names, err := client.Branches(repo)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping branches of %s: %v\n", repo, err)
+						continue
+					}
+					branches = names
 				}
-				findings := scanner.Scan(files, repo)
-				mu.Lock()
-				all = append(all, findings...)
-				mu.Unlock()
+				for _, branch := range branches {
+					target := sentiniel.GitHubTarget{Client: client, Repo: repo, Branch: branch, Excludes: excludes}
+					files, err := target.Files()
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s %s: %v\n", repo, branch, err)
+						continue
+					}
+					findings := scanner.Scan(files, repo)
+					for i := range findings {
+						findings[i].Branch = branch
+					}
+					mu.Lock()
+					all = append(all, findings...)
+					mu.Unlock()
+				}
 			}
 		}()
 	}

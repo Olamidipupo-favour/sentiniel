@@ -42,6 +42,15 @@ func TestIOCDetectsAutomaticTasksSetting(t *testing.T) {
 	}
 }
 
+func TestIOCDetectsUnparseableFolderOpenTask(t *testing.T) {
+	scanner, _ := NewScanner([]string{"ioc"})
+	// VS Code accepts comments in tasks.json; encoding/json does not.
+	files := []File{{Path: ".vscode/tasks.json", Data: []byte("{\n // build\n \"tasks\":[{\"command\":\"node ./x.orc\",\"runOptions\":{\"runOn\":\"folderOpen\"}}]\n}")}}
+	if findings := scanner.Scan(files, "repo"); len(findings) != 1 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+}
+
 func TestIOCDetectsRenamedFontPayload(t *testing.T) {
 	scanner, _ := NewScanner([]string{"ioc"})
 	files := []File{{Path: "public/fonts/fa-solid-600.ttf", Data: []byte(`(function(){require("child_process").execSync("id")})`)}}
@@ -84,6 +93,26 @@ func TestApplyDisablesAutomaticTasks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".sentiniel-quarantine", ".vscode", "settings.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGitHubTargetUsesRequestedBranch(t *testing.T) {
+	fake := &fakeGitHub{files: map[string][]byte{".vscode/tasks.json": []byte(`{"tasks":[]}`)}}
+	client := &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}
+	branches, err := client.Branches("o/r")
+	if err != nil || len(branches) != 2 {
+		t.Fatalf("Branches() = %v, %v", branches, err)
+	}
+	if _, err := (GitHubTarget{Client: client, Repo: "o/r", Branch: "develop"}).Files(); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range fake.requests {
+		if request == "GET /repos/o/r" {
+			t.Fatal("scanned the default branch when a branch was requested")
+		}
+	}
+	if !strings.Contains(strings.Join(fake.requests, "\n"), "/git/trees/develop") {
+		t.Fatalf("develop tree not requested: %v", fake.requests)
 	}
 }
 
@@ -246,6 +275,9 @@ func (f *fakeGitHub) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.requests = append(f.requests, req.Method+" "+req.URL.Path)
 	if req.URL.Path == "/repos/o/r" {
 		return jsonResponse(`{"default_branch":"main"}`), nil
+	}
+	if strings.HasPrefix(req.URL.Path, "/repos/o/r/branches") {
+		return jsonResponse(`[{"name":"main"},{"name":"develop"}]`), nil
 	}
 	if strings.HasPrefix(req.URL.Path, "/repos/o/r/git/trees/") {
 		var entries []string

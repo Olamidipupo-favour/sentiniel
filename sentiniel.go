@@ -37,6 +37,7 @@ const (
 
 type Finding struct {
 	Repository string   `json:"repository"`
+	Branch     string   `json:"branch,omitempty"`
 	Local      string   `json:"local,omitempty"`
 	Path       string   `json:"path"`
 	Strategy   string   `json:"strategy"`
@@ -111,6 +112,7 @@ var (
 	taskInterpreter = regexp.MustCompile(`(?i)^(?:node|nodejs|npx|deno|bun|python[0-9.]*|py|pwsh|powershell|cmd|bash|sh)$`)
 	disguisedScript = regexp.MustCompile(`(?i)\.(?:orc|ttf|otf|woff2?)$`)
 	automaticTasks  = regexp.MustCompile(`"task\.allowAutomaticTasks"\s*:\s*true`)
+	folderOpenTask  = regexp.MustCompile(`"runOn"\s*:\s*"folderOpen"`)
 )
 
 // fontHeaders lists the magic bytes each font format starts with.
@@ -242,6 +244,11 @@ func (IOCStrategy) Match(file File) (Finding, bool) {
 	if slashPath == ".vscode/tasks.json" {
 		if len(maliciousTasks(file.Data)) > 0 {
 			return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"folder-open task executes a disguised script payload"}, Action: "remove the task only after preserving the original and reviewing the repository"}, true
+		}
+		// A task file we cannot parse still might run on folder open. Report it, but remediation
+		// will refuse to rewrite it because the JSON is unknown.
+		if folderOpenTask.Match(file.Data) {
+			return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"folder-open task could not be parsed; inspect it manually"}, Action: "inspect the task file by hand; it runs when the repository is opened"}, true
 		}
 		return Finding{}, false
 	}
@@ -384,6 +391,7 @@ func (t LocalTarget) Remediate(f Finding, mode Mode) (string, error) {
 type GitHubTarget struct {
 	Client   *GitHubClient
 	Repo     string
+	Branch   string
 	Excludes []string
 }
 
@@ -564,6 +572,21 @@ func (c *GitHubClient) DefaultBranch(repo string) (string, error) {
 	return info.DefaultBranch, nil
 }
 
+// Branches lists the branches the token can see, so non-default branches are not trusted blindly.
+func (c *GitHubClient) Branches(repo string) ([]string, error) {
+	var branches []struct {
+		Name string `json:"name"`
+	}
+	if err := c.get("https://api.github.com/repos/"+repo+"/branches?per_page=100", &branches); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(branches))
+	for _, branch := range branches {
+		names = append(names, branch.Name)
+	}
+	return names, nil
+}
+
 type remoteFile struct {
 	SHA  string
 	Data []byte
@@ -645,9 +668,12 @@ func (t GitHubTarget) Remediate(f Finding, mode Mode) (string, error) {
 	if excludedPath(t.Excludes, f.Path) {
 		return "skipped: path is excluded", nil
 	}
-	branch, err := t.Client.DefaultBranch(t.Repo)
-	if err != nil {
-		return "", err
+	branch := t.Branch
+	if branch == "" {
+		var err error
+		if branch, err = t.Client.DefaultBranch(t.Repo); err != nil {
+			return "", err
+		}
 	}
 	original, err := t.Client.file(t.Repo, f.Path, branch)
 	if err != nil {
@@ -763,9 +789,12 @@ func contains(values []string, value string) bool {
 }
 
 func (t GitHubTarget) Files() ([]File, error) {
-	branch, err := t.Client.DefaultBranch(t.Repo)
-	if err != nil {
-		return nil, err
+	branch := t.Branch
+	if branch == "" {
+		var err error
+		if branch, err = t.Client.DefaultBranch(t.Repo); err != nil {
+			return nil, err
+		}
 	}
 	var tree struct {
 		Tree []struct {
