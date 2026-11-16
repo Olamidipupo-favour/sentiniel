@@ -63,3 +63,15 @@ the local refs `refs/evidence/worm-main`, `refs/evidence/worm-develop`, and the 
 The real history was restored by force-pushing `83f2b57` back to `main` and
 `develop`. Any clone made between the worm push and the restore must be treated as
 infected, and the GitHub token that had push access must be rotated.
+
+## Status
+
+- `main` and `develop` point at the fixed history. Malicious commits `4cf75e3` and
+  `05a4929` are kept only in local evidence refs and a bundle, never pushed.
+- `v0.5.1` closes the detection gaps found here: task `args`, hidden folder-open tasks,
+  unparseable task files, `task.allowAutomaticTasks`, renamed font payloads, quarantine
+  copies, remote `--exclude`, and per-finding apply progress.
+- `v0.5.2` adds `--all-branches`, because the worm pushed a second copy to `develop`.
+- Credential rotation is still the user's action. The worm had push access, so every
+  token, SSH key, and CLI session available on the workstation must be considered
+  exposed.
