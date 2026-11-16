@@ -10,8 +10,8 @@ Sentiniel is source-available; commercial use requires a paid licence. See [Lice
 ## What it detects
 
 The `ioc` and `workspace` strategies cover a confirmed propagation pattern: a hidden VS Code
-`folderOpen` task launches obfuscated JavaScript stored under a misleading font filename. Both
-known filenames and both confirmed payload hashes are recognised:
+`folderOpen` task launches obfuscated JavaScript stored under a misleading font filename. Known
+filenames and all confirmed payload hashes are recognised:
 
 ```text
 backend/app/routers/public/fonts/fa-brand-400.orc
@@ -19,6 +19,9 @@ af747d14f1303252002c14f82ed3c14f1da79e4d8396999b79b26ac135a0c5af
 
 backend/app/routers/public/fonts/fa-solid-600.ttf
 e20dc2838008cbcc0205d5a992cb3eb11a705d90fcd95582618c91c224b72549
+
+public/fonts/fa-solid-400.woff2
+f5638369cf9e169f89429685cb16e41c7081f2319ead0497b4e7cf7b1e34f771
 ```
 
 The task check inspects the whole task, not just `command`: a payload passed through `args`, a
