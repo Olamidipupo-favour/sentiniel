@@ -71,7 +71,7 @@ sentiniel run --interactive --clone ./clones --apply --confirm
 sentiniel scan --repo OWNER/REPO
 sentiniel scan --owner OWNER
 sentiniel scan --owner OWNER --all-branches
-sentiniel scan --repo OWNER/REPO --strategies ioc,heuristic
+sentiniel scan --repo OWNER/REPO --strategies ioc,workspace,heuristic
 sentiniel scan --repo OWNER/REPO --format json --output findings.json
 sentiniel action --path /path/to/repository --findings findings.json --mode dry-run
 sentiniel action --path /path/to/repository --findings findings.json --mode apply --confirm

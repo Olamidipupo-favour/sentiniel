@@ -13,8 +13,8 @@ import (
 	"testing"
 )
 
-func TestIOCDetectsFolderOpenPayloadTask(t *testing.T) {
-	scanner, err := NewScanner([]string{"ioc"})
+func TestWorkspaceDetectsFolderOpenPayloadTask(t *testing.T) {
+	scanner, err := NewScanner([]string{"workspace"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,16 +25,16 @@ func TestIOCDetectsFolderOpenPayloadTask(t *testing.T) {
 	}
 }
 
-func TestIOCDetectsPayloadInTaskArgs(t *testing.T) {
-	scanner, _ := NewScanner([]string{"ioc"})
+func TestWorkspaceDetectsPayloadInTaskArgs(t *testing.T) {
+	scanner, _ := NewScanner([]string{"workspace"})
 	files := []File{{Path: ".vscode/tasks.json", Data: []byte(`{"tasks":[{"label":"eslint-check","command":"node","args":["./fixtures/infected/backend/app/routers/public/fonts/fa-solid-600.ttf"],"hide":true,"runOptions":{"runOn":"folderOpen"}}]}`)}}
 	if findings := scanner.Scan(files, "repo"); len(findings) != 1 || findings[0].Severity != "HIGH" {
 		t.Fatalf("unexpected findings: %#v", findings)
 	}
 }
 
-func TestIOCDetectsAutomaticTasksSetting(t *testing.T) {
-	scanner, _ := NewScanner([]string{"ioc"})
+func TestWorkspaceDetectsAutomaticTasksSetting(t *testing.T) {
+	scanner, _ := NewScanner([]string{"workspace"})
 	files := []File{{Path: ".vscode/settings.json", Data: []byte(`{"editor.formatOnSave":true,"task.allowAutomaticTasks":true}`)}}
 	findings := scanner.Scan(files, "repo")
 	if len(findings) != 1 || findings[0].Severity != "HIGH" {
@@ -42,8 +42,8 @@ func TestIOCDetectsAutomaticTasksSetting(t *testing.T) {
 	}
 }
 
-func TestIOCDetectsUnparseableFolderOpenTask(t *testing.T) {
-	scanner, _ := NewScanner([]string{"ioc"})
+func TestWorkspaceDetectsUnparseableFolderOpenTask(t *testing.T) {
+	scanner, _ := NewScanner([]string{"workspace"})
 	// VS Code accepts comments in tasks.json; encoding/json does not.
 	files := []File{{Path: ".vscode/tasks.json", Data: []byte("{\n // build\n \"tasks\":[{\"command\":\"node ./x.orc\",\"runOptions\":{\"runOn\":\"folderOpen\"}}]\n}")}}
 	if findings := scanner.Scan(files, "repo"); len(findings) != 1 {
@@ -75,11 +75,11 @@ func TestApplyDisablesAutomaticTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := LocalTarget{Root: root}
-	files, err := target.Files()
+	files, err := target.Files(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scanner, _ := NewScanner([]string{"ioc"})
+	scanner, _ := NewScanner([]string{"workspace"})
 	findings := scanner.Scan(files, root)
 	if len(findings) != 1 {
 		t.Fatalf("unexpected findings: %#v", findings)
@@ -103,7 +103,7 @@ func TestGitHubTargetUsesRequestedBranch(t *testing.T) {
 	if err != nil || len(branches) != 2 {
 		t.Fatalf("Branches() = %v, %v", branches, err)
 	}
-	if _, err := (GitHubTarget{Client: client, Repo: "o/r", Branch: "develop"}).Files(); err != nil {
+	if _, err := (GitHubTarget{Client: client, Repo: "o/r", Branch: "develop"}).Files(nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, request := range fake.requests {
@@ -124,7 +124,7 @@ func TestGitHubFilesSkipsQuarantineAndExcludedPaths(t *testing.T) {
 		"fixtures/infected/backend/app/routers/public/fonts/fa-solid-600.ttf":     []byte("payload"),
 	}}
 	target := GitHubTarget{Client: &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}, Repo: "o/r", Excludes: []string{"fixtures/infected"}}
-	files, err := target.Files()
+	files, err := target.Files(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,11 +144,11 @@ func TestDryRunDoesNotChangeLocalFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := LocalTarget{Root: root}
-	files, err := target.Files()
+	files, err := target.Files(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scanner, _ := NewScanner([]string{"ioc"})
+	scanner, _ := NewScanner([]string{"workspace"})
 	findings := scanner.Scan(files, root)
 	if _, err := target.Remediate(findings[0], DryRun); err != nil {
 		t.Fatal(err)
@@ -177,8 +177,8 @@ func TestApplyQuarantinesPayloadAndTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := LocalTarget{Root: root}
-	files, _ := target.Files()
-	scanner, _ := NewScanner([]string{"ioc"})
+	files, _ := target.Files(nil)
+	scanner, _ := NewScanner([]string{"all"})
 	for _, finding := range scanner.Scan(files, root) {
 		if _, err := target.Remediate(finding, Apply); err != nil {
 			t.Fatal(err)
@@ -205,7 +205,7 @@ func TestLocalTargetSkipsExcludedPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, err := (LocalTarget{Root: root, Excludes: []string{"fixtures/infected"}}).Files()
+	files, err := (LocalTarget{Root: root, Excludes: []string{"fixtures/infected"}}).Files(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestRemoteRemediateStripsFolderOpenTask(t *testing.T) {
 		sha:   map[string]string{".vscode/tasks.json": "task-sha"},
 	}
 	target := GitHubTarget{Client: &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}, Repo: "o/r"}
-	if _, err := target.Remediate(Finding{Repository: "o/r", Path: ".vscode/tasks.json", Strategy: "ioc"}, Apply); err != nil {
+	if _, err := target.Remediate(Finding{Repository: "o/r", Path: ".vscode/tasks.json", Strategy: "workspace"}, Apply); err != nil {
 		t.Fatal(err)
 	}
 	written := string(fake.written[".vscode/tasks.json"])
@@ -370,7 +370,7 @@ func TestRemoteRemediateStripsFolderOpenTask(t *testing.T) {
 	}
 }
 
-func TestRemoteRemediateRequiresApplyAndIOC(t *testing.T) {
+func TestRemoteRemediateRequiresApplyAndFixer(t *testing.T) {
 	fake := &fakeGitHub{}
 	target := GitHubTarget{Client: &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}, Repo: "o/r"}
 	message, err := target.Remediate(Finding{Repository: "o/r", Path: KnownPayloadPath, Strategy: "ioc"}, DryRun)
@@ -383,5 +383,20 @@ func TestRemoteRemediateRequiresApplyAndIOC(t *testing.T) {
 	}
 	if len(fake.requests) != 0 {
 		t.Fatalf("dry-run made %d API requests: %v", len(fake.requests), fake.requests)
+	}
+}
+
+func TestScannerCandidateSelection(t *testing.T) {
+	workspace, _ := NewScanner([]string{"workspace"})
+	if !workspace.Candidate(".vscode/tasks.json") || workspace.Candidate("README.md") {
+		t.Fatal("workspace candidate selection is wrong")
+	}
+	ioc, _ := NewScanner([]string{"ioc"})
+	if !ioc.Candidate("public/fonts/fa-solid-600.ttf") || ioc.Candidate("README.md") {
+		t.Fatal("ioc candidate selection is wrong")
+	}
+	heuristic, _ := NewScanner([]string{"heuristic"})
+	if !heuristic.Candidate("src/api.js") || heuristic.Candidate(".vscode/tasks.json") {
+		t.Fatal("heuristic candidate selection is wrong")
 	}
 }

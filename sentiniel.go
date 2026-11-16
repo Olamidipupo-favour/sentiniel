@@ -2,9 +2,7 @@ package sentiniel
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,18 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
-)
-
-const (
-	KnownPayloadName = "fa-brand-400.orc"
-	KnownPayloadPath = "backend/app/routers/public/fonts/fa-brand-400.orc"
-	KnownPayloadSHA  = "af747d14f1303252002c14f82ed3c14f1da79e4d8396999b79b26ac135a0c5af"
-	// KnownPayloadSHA2 was recovered from the worm commit that rewrote Sentiniel's own history.
-	KnownPayloadSHA2 = "e20dc2838008cbcc0205d5a992cb3eb11a705d90fcd95582618c91c224b72549"
 )
 
 type Mode string
@@ -52,25 +41,57 @@ type File struct {
 	Data []byte
 }
 
+// Strategy inspects one immutable file. Detection patterns live in the strategy, never in the
+// scanner or the targets.
 type Strategy interface {
 	Name() string
 	Match(File) (Finding, bool)
+}
+
+// Fixer is implemented by strategies that can repair what they detect. A strategy without it is
+// advisory: apply mode leaves its findings alone.
+type Fixer interface {
+	// Fix returns replacement bytes, or remove=true for a file that must be deleted. If the
+	// returned bytes equal the input, the target writes nothing.
+	Fix(path string, data []byte) (updated []byte, remove bool, message string)
+}
+
+// Candidate is implemented by strategies that know which paths they can inspect. A strategy
+// without it is offered every candidate file.
+type Candidate interface {
+	Candidate(path string) bool
 }
 
 type Scanner struct {
 	Strategies []Strategy
 }
 
+func allStrategies() []Strategy {
+	return []Strategy{IOCStrategy{}, WorkspaceStrategy{}, HeuristicStrategy{}}
+}
+
+func strategyByName(name string) (Strategy, bool) {
+	for _, strategy := range allStrategies() {
+		if strategy.Name() == name {
+			return strategy, true
+		}
+	}
+	return nil, false
+}
+
 func NewScanner(names []string) (*Scanner, error) {
-	available := map[string]Strategy{"ioc": IOCStrategy{}, "heuristic": HeuristicStrategy{}}
 	if len(names) == 0 || contains(names, "all") {
-		names = []string{"ioc", "heuristic"}
+		return &Scanner{Strategies: allStrategies()}, nil
 	}
 	var selected []Strategy
 	for _, name := range names {
-		strategy, ok := available[name]
+		strategy, ok := strategyByName(name)
 		if !ok {
-			return nil, fmt.Errorf("unknown strategy %q (available: ioc, heuristic, all)", name)
+			available := make([]string, 0, len(allStrategies()))
+			for _, strategy := range allStrategies() {
+				available = append(available, strategy.Name())
+			}
+			return nil, fmt.Errorf("unknown strategy %q (available: %s, all)", name, strings.Join(available, ", "))
 		}
 		selected = append(selected, strategy)
 	}
@@ -93,202 +114,16 @@ func (s *Scanner) Scan(files []File, repository string) []Finding {
 	return findings
 }
 
-type TaskFile struct {
-	Version string `json:"version"`
-	Tasks   []Task `json:"tasks"`
-}
-
-type Task struct {
-	Label      string   `json:"label"`
-	Command    string   `json:"command"`
-	Args       []string `json:"args"`
-	Hide       bool     `json:"hide"`
-	RunOptions struct {
-		RunOn string `json:"runOn"`
-	} `json:"runOptions"`
-}
-
-var (
-	taskInterpreter = regexp.MustCompile(`(?i)^(?:node|nodejs|npx|deno|bun|python[0-9.]*|py|pwsh|powershell|cmd|bash|sh)$`)
-	disguisedScript = regexp.MustCompile(`(?i)\.(?:orc|ttf|otf|woff2?)$`)
-	automaticTasks  = regexp.MustCompile(`"task\.allowAutomaticTasks"\s*:\s*true`)
-	folderOpenTask  = regexp.MustCompile(`"runOn"\s*:\s*"folderOpen"`)
-)
-
-// fontHeaders lists the magic bytes each font format starts with.
-var fontHeaders = map[string][][]byte{
-	".ttf":   {[]byte{0, 1, 0, 0}, []byte("true"), []byte("ttcf")},
-	".otf":   {[]byte("OTTO")},
-	".woff":  {[]byte("wOFF")},
-	".woff2": {[]byte("wOF2")},
-}
-
-// fontHeaderValid reports whether a file with a font extension really starts like one. The worm
-// renamed its JavaScript payload to .ttf, so a mismatched header is the signal, not the name.
-func fontHeaderValid(path string, data []byte) bool {
-	headers, ok := fontHeaders[strings.ToLower(filepath.Ext(path))]
-	if !ok {
-		return true
-	}
-	for _, header := range headers {
-		if bytes.HasPrefix(data, header) {
+// Candidate reports whether any selected strategy wants this path. Targets use it so they do not
+// download files that no strategy can inspect.
+func (s *Scanner) Candidate(path string) bool {
+	for _, strategy := range s.Strategies {
+		candidate, ok := strategy.(Candidate)
+		if !ok || candidate.Candidate(path) {
 			return true
 		}
 	}
 	return false
-}
-
-// taskIsMalicious flags a task that hands a non-script file to an interpreter, or a hidden
-// folder-open task. The worm puts the payload in args, so command alone is not enough.
-// shortcut: only flags interpreter-plus-known-extension or a hidden folder-open task; a renamed
-// payload with a novel extension still needs hash or header detection.
-func taskIsMalicious(task Task) bool {
-	words := append(strings.Fields(task.Command), task.Args...)
-	for _, word := range words {
-		word = strings.ReplaceAll(word, "\\", "/")
-		if strings.Contains(word, KnownPayloadPath) || filepath.Base(word) == KnownPayloadName {
-			return true
-		}
-	}
-	if task.RunOptions.RunOn != "folderOpen" {
-		return false
-	}
-	for _, word := range words {
-		if task.Hide && taskInterpreter.MatchString(filepath.Base(strings.Trim(word, `"'()`))) {
-			return true
-		}
-	}
-	for i, word := range words {
-		if !disguisedScript.MatchString(word) {
-			continue
-		}
-		for _, previous := range words[:i] {
-			if taskInterpreter.MatchString(filepath.Base(strings.Trim(previous, `"'()`))) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// decodeTaskFile tolerates the UTF-8 BOM the worm writes in front of tasks.json.
-func decodeTaskFile(data []byte) (TaskFile, error) {
-	var tasks TaskFile
-	err := json.Unmarshal(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), &tasks)
-	return tasks, err
-}
-
-// maliciousTasks returns the tasks a .vscode/tasks.json file must lose.
-func maliciousTasks(data []byte) []Task {
-	tasks, err := decodeTaskFile(data)
-	if err != nil {
-		return nil
-	}
-	var bad []Task
-	for _, task := range tasks.Tasks {
-		if taskIsMalicious(task) {
-			bad = append(bad, task)
-		}
-	}
-	return bad
-}
-
-func withoutMaliciousTasks(tasks TaskFile) TaskFile {
-	filtered := tasks.Tasks[:0]
-	for _, task := range tasks.Tasks {
-		if !taskIsMalicious(task) {
-			filtered = append(filtered, task)
-		}
-	}
-	tasks.Tasks = filtered
-	return tasks
-}
-
-func automaticTasksEnabled(data []byte) bool { return automaticTasks.Match(data) }
-
-func disableAutomaticTasks(data []byte) []byte {
-	return automaticTasks.ReplaceAll(data, []byte(`"task.allowAutomaticTasks": false`))
-}
-
-// scannable reports whether a path is worth downloading: the workspace files, known payload names,
-// api.js, and any file claiming to be a font (headers are checked after download).
-func scannable(path string) bool {
-	if path == ".vscode/tasks.json" || path == ".vscode/settings.json" {
-		return true
-	}
-	base := filepath.Base(path)
-	if base == KnownPayloadName || base == "api.js" {
-		return true
-	}
-	_, isFont := fontHeaders[strings.ToLower(filepath.Ext(base))]
-	return isFont
-}
-
-func excludedPath(excludes []string, path string) bool {
-	path = filepath.ToSlash(path)
-	for _, excluded := range excludes {
-		excluded = strings.Trim(strings.ReplaceAll(excluded, "\\", "/"), "/")
-		if excluded != "" && (path == excluded || strings.HasPrefix(path, excluded+"/")) {
-			return true
-		}
-	}
-	return false
-}
-
-type IOCStrategy struct{}
-
-func (IOCStrategy) Name() string { return "ioc" }
-
-func (IOCStrategy) Match(file File) (Finding, bool) {
-	slashPath := filepath.ToSlash(file.Path)
-	if slashPath == ".vscode/tasks.json" {
-		if len(maliciousTasks(file.Data)) > 0 {
-			return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"folder-open task executes a disguised script payload"}, Action: "remove the task only after preserving the original and reviewing the repository"}, true
-		}
-		// A task file we cannot parse still might run on folder open. Report it, but remediation
-		// will refuse to rewrite it because the JSON is unknown.
-		if folderOpenTask.Match(file.Data) {
-			return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"folder-open task could not be parsed; inspect it manually"}, Action: "inspect the task file by hand; it runs when the repository is opened"}, true
-		}
-		return Finding{}, false
-	}
-	sum := sha256.Sum256(file.Data)
-	hash := hex.EncodeToString(sum[:])
-	if slashPath == ".vscode/settings.json" {
-		if !automaticTasksEnabled(file.Data) {
-			return Finding{}, false
-		}
-		return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"workspace enables automatic tasks, so a folder-open task runs without confirmation"}, SHA256: hash, Action: "set task.allowAutomaticTasks to false and review .vscode/tasks.json"}, true
-	}
-	if hash == KnownPayloadSHA || hash == KnownPayloadSHA2 || filepath.Base(slashPath) == KnownPayloadName {
-		reasons := []string{"known payload filename"}
-		if hash == KnownPayloadSHA || hash == KnownPayloadSHA2 {
-			reasons = append(reasons, "matches known payload SHA-256")
-		}
-		return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: reasons, SHA256: hash, Action: "preserve evidence, quarantine the file, rotate credentials if it may have executed"}, true
-	}
-	if !fontHeaderValid(slashPath, file.Data) {
-		return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"font extension but no font header; likely a renamed script"}, SHA256: hash, Action: "preserve evidence, quarantine the file, do not execute it"}, true
-	}
-	return Finding{}, false
-}
-
-var suspiciousJS = regexp.MustCompile(`(?i)(?:child_process|execSync|spawnSync|require\s*\(|process\.env|eval\s*\(|new\s+Function\s*\(|https?://|Buffer\.from)`)
-
-type HeuristicStrategy struct{}
-
-func (HeuristicStrategy) Name() string { return "heuristic" }
-
-func (HeuristicStrategy) Match(file File) (Finding, bool) {
-	if filepath.Base(file.Path) != "api.js" || len(file.Data) < 20000 || !suspiciousJS.Match(file.Data) {
-		return Finding{}, false
-	}
-	text := string(file.Data)
-	if !strings.Contains(text, "eval") && !strings.Contains(text, "child_process") {
-		return Finding{}, false
-	}
-	sum := sha256.Sum256(file.Data)
-	return Finding{Path: file.Path, Strategy: "heuristic", Severity: "MEDIUM", Reasons: []string{"large api.js contains execution/network indicators and possible obfuscation; manual review required"}, SHA256: hex.EncodeToString(sum[:]), Action: "do not execute; inspect statically and review provenance before changing it"}, true
 }
 
 type LocalTarget struct {
@@ -296,7 +131,7 @@ type LocalTarget struct {
 	Excludes []string
 }
 
-func (t LocalTarget) Files() ([]File, error) {
+func (t LocalTarget) Files(accept func(string) bool) ([]File, error) {
 	info, err := os.Stat(t.Root)
 	if err != nil {
 		return nil, err
@@ -320,16 +155,14 @@ func (t LocalTarget) Files() ([]File, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if excludedPath(t.Excludes, rel) {
+		if excludedPath(t.Excludes, rel) || (accept != nil && !accept(rel)) {
 			return nil
 		}
-		if scannable(rel) {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			files = append(files, File{Path: rel, Data: data})
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
 		}
+		files = append(files, File{Path: rel, Data: data})
 		return nil
 	})
 	return files, err
@@ -339,53 +172,38 @@ func (t LocalTarget) Remediate(f Finding, mode Mode) (string, error) {
 	if mode == DryRun {
 		return "dry-run: no files changed", nil
 	}
-	if f.Strategy != "ioc" {
-		return "manual remediation required for advisory finding; no files changed", nil
-	}
 	if excludedPath(t.Excludes, f.Path) {
 		return "skipped: path is excluded", nil
 	}
-	source := filepath.Join(t.Root, filepath.FromSlash(f.Path))
-	quarantine := filepath.Join(t.Root, ".sentiniel-quarantine", filepath.FromSlash(f.Path))
-	if err := os.MkdirAll(filepath.Dir(quarantine), 0700); err != nil {
-		return "", err
+	strategy, ok := strategyByName(f.Strategy)
+	fixer, ok := strategy.(Fixer)
+	if !ok {
+		return "manual remediation required for advisory finding; no files changed", nil
 	}
+	source := filepath.Join(t.Root, filepath.FromSlash(f.Path))
 	data, err := os.ReadFile(source)
 	if err != nil {
+		return "", err
+	}
+	updated, remove, message := fixer.Fix(f.Path, data)
+	if !remove && bytes.Equal(updated, data) {
+		return message, nil
+	}
+	quarantine := filepath.Join(t.Root, ".sentiniel-quarantine", filepath.FromSlash(f.Path))
+	if err := os.MkdirAll(filepath.Dir(quarantine), 0700); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(quarantine, data, 0600); err != nil {
 		return "", err
 	}
-	if f.Path == ".vscode/tasks.json" {
-		tasks, err := decodeTaskFile(data)
-		if err != nil {
+	if remove {
+		if err := os.Remove(source); err != nil {
 			return "", err
 		}
-		tasks = withoutMaliciousTasks(tasks)
-		out, err := json.MarshalIndent(tasks, "", "  ")
-		if err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(source, append(out, '\n'), 0600); err != nil {
-			return "", err
-		}
-		return "removed malicious folder-open task; original saved in .sentiniel-quarantine", nil
-	}
-	if f.Path == ".vscode/settings.json" {
-		updated := disableAutomaticTasks(data)
-		if bytes.Equal(updated, data) {
-			return "no automatic-task setting found; no files changed", nil
-		}
-		if err := os.WriteFile(source, updated, 0600); err != nil {
-			return "", err
-		}
-		return "disabled automatic workspace tasks; original saved in .sentiniel-quarantine", nil
-	}
-	if err := os.Remove(source); err != nil {
+	} else if err := os.WriteFile(source, updated, 0600); err != nil {
 		return "", err
 	}
-	return "removed suspicious file; original saved in .sentiniel-quarantine", nil
+	return message + "; original saved in .sentiniel-quarantine", nil
 }
 
 type GitHubTarget struct {
@@ -656,17 +474,22 @@ func (c *GitHubClient) deleteFile(repo, path, branch, message, sha string) (stri
 	return out.Commit.SHA, nil
 }
 
-// Remediate fixes a finding directly on the remote default branch. It is only called after explicit
-// user confirmation, keeps a copy under .sentiniel-quarantine, and never touches advisory findings.
+// Remediate fixes a finding directly on the remote branch. It is only called after explicit user
+// confirmation, keeps a copy under .sentiniel-quarantine, and never touches advisory findings.
 func (t GitHubTarget) Remediate(f Finding, mode Mode) (string, error) {
 	if mode == DryRun {
 		return "dry-run: no remote changes", nil
 	}
-	if f.Strategy != "ioc" {
-		return "manual remediation required for advisory finding; no remote changes", nil
-	}
 	if excludedPath(t.Excludes, f.Path) {
 		return "skipped: path is excluded", nil
+	}
+	strategy, ok := strategyByName(f.Strategy)
+	if !ok {
+		return "unknown strategy in findings plan; rescan before applying", nil
+	}
+	fixer, ok := strategy.(Fixer)
+	if !ok {
+		return "manual remediation required for advisory finding; no remote changes", nil
 	}
 	branch := t.Branch
 	if branch == "" {
@@ -679,44 +502,26 @@ func (t GitHubTarget) Remediate(f Finding, mode Mode) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	updated, remove, message := fixer.Fix(f.Path, original.Data)
+	if !remove && bytes.Equal(updated, original.Data) {
+		return message, nil
+	}
 	quarantine := ".sentiniel-quarantine/" + f.Path
 	if _, err := t.Client.file(t.Repo, quarantine, branch); err != nil {
 		if _, err := t.Client.putFile(t.Repo, quarantine, branch, "sentiniel: preserve "+f.Path, original.Data, ""); err != nil {
 			return "", fmt.Errorf("preserve original: %w", err)
 		}
 	}
-	if f.Path == ".vscode/tasks.json" {
-		tasks, err := decodeTaskFile(original.Data)
-		if err != nil {
-			return "", err
-		}
-		tasks = withoutMaliciousTasks(tasks)
-		out, err := json.MarshalIndent(tasks, "", "  ")
-		if err != nil {
-			return "", err
-		}
-		sha, err := t.Client.putFile(t.Repo, f.Path, branch, "sentiniel: remove folder-open payload task", append(out, '\n'), original.SHA)
-		if err != nil {
-			return "", err
-		}
-		return "removed remote folder-open task; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
+	var sha string
+	if remove {
+		sha, err = t.Client.deleteFile(t.Repo, f.Path, branch, "sentiniel: "+message, original.SHA)
+	} else {
+		sha, err = t.Client.putFile(t.Repo, f.Path, branch, "sentiniel: "+message, updated, original.SHA)
 	}
-	if f.Path == ".vscode/settings.json" {
-		updated := disableAutomaticTasks(original.Data)
-		if bytes.Equal(updated, original.Data) {
-			return "no automatic-task setting found; no remote changes", nil
-		}
-		sha, err := t.Client.putFile(t.Repo, f.Path, branch, "sentiniel: disable automatic workspace tasks", updated, original.SHA)
-		if err != nil {
-			return "", err
-		}
-		return "disabled remote automatic tasks; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
-	}
-	sha, err := t.Client.deleteFile(t.Repo, f.Path, branch, "sentiniel: remove known payload file", original.SHA)
 	if err != nil {
 		return "", err
 	}
-	return "removed remote suspicious file; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
+	return message + "; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
 }
 
 func shortSHA(sha string) string {
@@ -779,6 +584,18 @@ func decodeGitHubContent(content string) ([]byte, error) {
 	return data, nil
 }
 
+// excludedPath reports whether path is one of the excluded subtrees.
+func excludedPath(excludes []string, path string) bool {
+	path = filepath.ToSlash(path)
+	for _, excluded := range excludes {
+		excluded = strings.Trim(strings.ReplaceAll(excluded, "\\", "/"), "/")
+		if excluded != "" && (path == excluded || strings.HasPrefix(path, excluded+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
 func contains(values []string, value string) bool {
 	for _, item := range values {
 		if item == value {
@@ -788,7 +605,7 @@ func contains(values []string, value string) bool {
 	return false
 }
 
-func (t GitHubTarget) Files() ([]File, error) {
+func (t GitHubTarget) Files(accept func(string) bool) ([]File, error) {
 	branch := t.Branch
 	if branch == "" {
 		var err error
@@ -809,7 +626,7 @@ func (t GitHubTarget) Files() ([]File, error) {
 	}
 	var files []File
 	for _, item := range tree.Tree {
-		if item.Type != "blob" || !scannable(item.Path) || excludedPath(t.Excludes, item.Path) {
+		if item.Type != "blob" || excludedPath(t.Excludes, item.Path) || (accept != nil && !accept(item.Path)) {
 			continue
 		}
 		if strings.HasPrefix(item.Path, ".sentiniel-quarantine/") || strings.Contains(item.Path, "/.sentiniel-quarantine/") {

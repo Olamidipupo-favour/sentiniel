@@ -324,7 +324,7 @@ func scanClones(token, dir string, repos []string, scanner *sentiniel.Scanner, e
 			fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
 			continue
 		}
-		files, err := (sentiniel.LocalTarget{Root: dest, Excludes: excludes}).Files()
+		files, err := (sentiniel.LocalTarget{Root: dest, Excludes: excludes}).Files(scanner.Candidate)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
 			continue
@@ -397,7 +397,7 @@ func newScanFlags(o *options) *flag.FlagSet {
 	fs.StringVar(&o.path, "path", "", "local repository or parent directory")
 	fs.StringVar(&o.repo, "repo", "", "GitHub repository owner/name")
 	fs.StringVar(&o.owner, "owner", "", "GitHub owner or organization")
-	fs.StringVar(&o.strategies, "strategies", "all", "comma-separated strategies: ioc,heuristic,all")
+	fs.StringVar(&o.strategies, "strategies", "all", "comma-separated strategies: ioc,workspace,heuristic,all")
 	fs.StringVar(&o.format, "format", "text", "output format: text or json")
 	fs.StringVar(&o.output, "output", "", "write JSON findings plan to this file")
 	fs.StringVar(&o.exclude, "exclude", "", "comma-separated paths to exclude (local or remote)")
@@ -455,7 +455,7 @@ func collectFindings(o options) []sentiniel.Finding {
 	if info.IsDir() && o.recursive {
 		var all []sentiniel.Finding
 		target := sentiniel.LocalTarget{Root: o.path, Excludes: split(o.exclude)}
-		rootFiles, err := target.Files()
+		rootFiles, err := target.Files(scanner.Candidate)
 		if err != nil {
 			fatal(err.Error())
 		}
@@ -463,7 +463,7 @@ func collectFindings(o options) []sentiniel.Finding {
 		entries, _ := os.ReadDir(o.path)
 		for _, entry := range entries {
 			if entry.IsDir() && entry.Name() != "machoka" && entry.Name() != ".git" && !strings.HasPrefix(entry.Name(), ".sentiniel-") {
-				files, err := (sentiniel.LocalTarget{Root: filepath.Join(o.path, entry.Name()), Excludes: split(o.exclude)}).Files()
+				files, err := (sentiniel.LocalTarget{Root: filepath.Join(o.path, entry.Name()), Excludes: split(o.exclude)}).Files(scanner.Candidate)
 				if err != nil {
 					fatal(err.Error())
 				}
@@ -472,7 +472,7 @@ func collectFindings(o options) []sentiniel.Finding {
 		}
 		return all
 	}
-	files, err := (sentiniel.LocalTarget{Root: o.path, Excludes: split(o.exclude)}).Files()
+	files, err := (sentiniel.LocalTarget{Root: o.path, Excludes: split(o.exclude)}).Files(scanner.Candidate)
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -507,7 +507,7 @@ func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentinie
 				}
 				for _, branch := range branches {
 					target := sentiniel.GitHubTarget{Client: client, Repo: repo, Branch: branch, Excludes: excludes}
-					files, err := target.Files()
+					files, err := target.Files(scanner.Candidate)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s %s: %v\n", repo, branch, err)
 						continue
@@ -603,7 +603,7 @@ func runWebhook(args []string) {
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
 			return
 		}
-		files, err := (sentiniel.GitHubTarget{Client: client, Repo: repo}).Files()
+		files, err := (sentiniel.GitHubTarget{Client: client, Repo: repo}).Files(scanner.Candidate)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
