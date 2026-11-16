@@ -22,7 +22,7 @@ checksum:
 changelog:
   abbrev: 7
   sort: asc
-  format: "{{.Message}} ({{.ShortSHA}})"
+  format: "{{.Message}} ({{.SHA}})"
   filters:
     exclude:
       - "^Merge "
