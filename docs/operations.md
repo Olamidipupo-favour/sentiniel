@@ -41,10 +41,15 @@ stored token with `sentiniel logout`.
 
    ```sh
    sentiniel run --owner YOUR_ACCOUNT --apply --confirm --force-remote
+   sentiniel run --interactive --apply --confirm --force-remote --exclude fixtures/infected
+   sentiniel action --findings findings.json --force-remote --confirm --exclude fixtures/infected
    ```
 
+   The apply phase prints one line per finding to stderr, so a long run is not mistaken for a hang.
+
    Every remote fix is a commit on the default branch. Prefer `--clone` and a pull request when the
-   repository has branch protection or reviewers.
+   repository has branch protection or reviewers. `--exclude` also applies to remote paths, which
+   keeps a repository's own malicious-looking fixture from being rewritten.
 
    Repositories that GitHub rejects or times out on are printed as warnings and skipped. They are
    not reported as clean.

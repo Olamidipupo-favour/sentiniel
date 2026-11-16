@@ -98,6 +98,7 @@ func runAction(args []string) {
 	fs.StringVar(&o.path, "path", "", "local repository")
 	fs.StringVar(&o.findings, "findings", "", "JSON findings file produced by scan")
 	fs.StringVar((*string)(&o.mode), "mode", string(sentiniel.DryRun), "action mode: dry-run or apply")
+	fs.StringVar(&o.exclude, "exclude", "", "comma-separated repository paths to exclude")
 	fs.BoolVar(&o.confirm, "confirm", false, "confirm remediation")
 	fs.BoolVar(&o.forceRemote, "force-remote", false, "write fixes to remote repositories directly")
 	fs.Parse(args)
@@ -116,7 +117,7 @@ func runAction(args []string) {
 		fatal("findings file must be a JSON array")
 	}
 	client := remoteClient(o)
-	remediateAll(findings, o.path, client, o.mode)
+	remediateAll(findings, o.path, client, o.mode, split(o.exclude))
 	printFindings(findings, options{format: "text", mode: o.mode})
 }
 
@@ -145,20 +146,21 @@ func remoteClient(o options) *sentiniel.GitHubClient {
 
 // remediateAll fixes each finding in the local copy it belongs to, or on the remote repository when
 // --force-remote supplied a client. A finding with no target is reported, never silently dropped.
-func remediateAll(findings []sentiniel.Finding, path string, client *sentiniel.GitHubClient, mode sentiniel.Mode) (local, remote bool) {
+func remediateAll(findings []sentiniel.Finding, path string, client *sentiniel.GitHubClient, mode sentiniel.Mode, excludes []string) (local, remote bool) {
 	for i := range findings {
 		var action string
 		var err error
 		root := remediationRoot(findings[i], path)
 		switch {
 		case root != "":
-			action, err = sentiniel.LocalTarget{Root: root}.Remediate(findings[i], mode)
+			action, err = sentiniel.LocalTarget{Root: root, Excludes: excludes}.Remediate(findings[i], mode)
 			local = true
 		case client != nil && strings.Contains(findings[i].Repository, "/"):
-			action, err = (sentiniel.GitHubTarget{Client: client, Repo: findings[i].Repository}).Remediate(findings[i], mode)
+			action, err = (sentiniel.GitHubTarget{Client: client, Repo: findings[i].Repository, Excludes: excludes}).Remediate(findings[i], mode)
 			remote = true
 		default:
 			findings[i].Action = "skipped: no local copy; use --path or --clone, or --force-remote for a remote write"
+			fmt.Fprintf(os.Stderr, "sentiniel: [%d/%d] %s %s: no target\n", i+1, len(findings), findings[i].Repository, findings[i].Path)
 			continue
 		}
 		if err != nil {
@@ -166,6 +168,8 @@ func remediateAll(findings []sentiniel.Finding, path string, client *sentiniel.G
 		} else {
 			findings[i].Action = action
 		}
+		// The apply phase can take minutes; one line per finding proves it is moving.
+		fmt.Fprintf(os.Stderr, "sentiniel: [%d/%d] %s %s: %s\n", i+1, len(findings), findings[i].Repository, findings[i].Path, findings[i].Action)
 	}
 	return local, remote
 }
@@ -190,7 +194,7 @@ func runCombined(args []string) {
 	if !apply || !o.confirm {
 		return
 	}
-	local, remote := remediateAll(findings, o.path, remoteClient(o), sentiniel.Apply)
+	local, remote := remediateAll(findings, o.path, remoteClient(o), sentiniel.Apply, split(o.exclude))
 	if !local && !remote && len(findings) > 0 {
 		fatal("confirmed actions need a target: pass --path, --clone DIR with --interactive, or --force-remote")
 	}
@@ -297,13 +301,13 @@ func collectInteractive(o options, scanner *sentiniel.Scanner) []sentiniel.Findi
 		selected = append(selected, repos[i])
 	}
 	if o.clone == "" {
-		return scanRepos(client, selected, scanner)
+		return scanRepos(client, selected, scanner, split(o.exclude))
 	}
-	return scanClones(client.Token, o.clone, selected, scanner)
+	return scanClones(client.Token, o.clone, selected, scanner, split(o.exclude))
 }
 
 // scanClones downloads each repository and scans the local copy, so `run --clone` can remediate it.
-func scanClones(token, dir string, repos []string, scanner *sentiniel.Scanner) []sentiniel.Finding {
+func scanClones(token, dir string, repos []string, scanner *sentiniel.Scanner, excludes []string) []sentiniel.Finding {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		fatal(err.Error())
 	}
@@ -320,7 +324,7 @@ func scanClones(token, dir string, repos []string, scanner *sentiniel.Scanner) [
 			fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
 			continue
 		}
-		files, err := (sentiniel.LocalTarget{Root: dest}).Files()
+		files, err := (sentiniel.LocalTarget{Root: dest, Excludes: excludes}).Files()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)
 			continue
@@ -396,7 +400,7 @@ func newScanFlags(o *options) *flag.FlagSet {
 	fs.StringVar(&o.strategies, "strategies", "all", "comma-separated strategies: ioc,heuristic,all")
 	fs.StringVar(&o.format, "format", "text", "output format: text or json")
 	fs.StringVar(&o.output, "output", "", "write JSON findings plan to this file")
-	fs.StringVar(&o.exclude, "exclude", "", "comma-separated local relative paths to exclude")
+	fs.StringVar(&o.exclude, "exclude", "", "comma-separated paths to exclude (local or remote)")
 	fs.StringVar(&o.token, "token", "", "GitHub token for this run (or GITHUB_TOKEN/GH_TOKEN, sentiniel login)")
 	fs.StringVar(&o.failOn, "fail-on", "", "exit nonzero when findings meet severity: low,medium,high")
 	fs.BoolVar(&o.recursive, "recursive", false, "scan immediate child directories as well as --path")
@@ -441,7 +445,7 @@ func collectFindings(o options) []sentiniel.Finding {
 				fatal(err.Error())
 			}
 		}
-		return scanRepos(client, repos, scanner)
+		return scanRepos(client, repos, scanner, split(o.exclude))
 	}
 	info, err := os.Stat(o.path)
 	if err != nil {
@@ -474,7 +478,7 @@ func collectFindings(o options) []sentiniel.Finding {
 	return scanner.Scan(files, o.path)
 }
 
-func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentiniel.Scanner) []sentiniel.Finding {
+func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentiniel.Scanner, excludes []string) []sentiniel.Finding {
 	var all []sentiniel.Finding
 	if len(repos) == 0 {
 		return all
@@ -491,7 +495,7 @@ func scanRepos(client *sentiniel.GitHubClient, repos []string, scanner *sentinie
 		go func() {
 			defer wg.Done()
 			for repo := range jobs {
-				target := sentiniel.GitHubTarget{Client: client, Repo: repo}
+				target := sentiniel.GitHubTarget{Client: client, Repo: repo, Excludes: excludes}
 				files, err := target.Files()
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "sentiniel: warning: skipping %s: %v\n", repo, err)

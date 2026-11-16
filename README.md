@@ -9,13 +9,27 @@ Sentiniel is source-available; commercial use requires a paid licence. See [Lice
 
 ## What it detects
 
-The initial IOC covers a confirmed propagation pattern: a hidden VS Code `folderOpen` task launches
-obfuscated JavaScript stored under the misleading `.orc` font filename
-`backend/app/routers/public/fonts/fa-brand-400.orc`. The known payload SHA-256 is:
+The IOC covers a confirmed propagation pattern: a hidden VS Code `folderOpen` task launches
+obfuscated JavaScript stored under a misleading font filename. Both known filenames and both
+confirmed payload hashes are recognised:
 
 ```text
+backend/app/routers/public/fonts/fa-brand-400.orc
 af747d14f1303252002c14f82ed3c14f1da79e4d8396999b79b26ac135a0c5af
+
+backend/app/routers/public/fonts/fa-solid-600.ttf
+e20dc2838008cbcc0205d5a992cb3eb11a705d90fcd95582618c91c224b72549
 ```
+
+The task check inspects the whole task, not just `command`: a payload passed through `args`, a
+hidden task, or a folder-open task that hands a non-script file to `node`, `bash`, `python`,
+`powershell`, or a similar interpreter is reported. Any file that claims a font extension but does
+not start with a font header is also reported, which catches renamed payloads that are not in the
+hash list.
+
+`.vscode/settings.json` is reported when it sets `task.allowAutomaticTasks` to `true`, because that
+removes the prompt that would otherwise stop a folder-open task. Remediation sets it to `false` and
+keeps the rest of the file.
 
 The heuristic strategy reports large `api.js` files combining execution/network indicators with
 possible obfuscation. It is advisory, not proof of compromise.
@@ -84,7 +98,9 @@ in `.sentiniel-quarantine`, removes the known folder-open task, and does not aut
 heuristic findings.
 
 Use `--exclude` only for intentional fixtures or approved generated content; exclusions are not
-evidence of cleanliness.
+evidence of cleanliness. It applies to local and remote scans and to remediation, so
+`--exclude fixtures/infected` prevents a repository's own test fixture from being rewritten.
+`.sentiniel-quarantine` copies are always skipped, so an applied fix does not re-flag itself.
 
 ## Extensibility
 

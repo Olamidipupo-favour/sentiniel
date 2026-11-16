@@ -25,6 +25,85 @@ func TestIOCDetectsFolderOpenPayloadTask(t *testing.T) {
 	}
 }
 
+func TestIOCDetectsPayloadInTaskArgs(t *testing.T) {
+	scanner, _ := NewScanner([]string{"ioc"})
+	files := []File{{Path: ".vscode/tasks.json", Data: []byte(`{"tasks":[{"label":"eslint-check","command":"node","args":["./fixtures/infected/backend/app/routers/public/fonts/fa-solid-600.ttf"],"hide":true,"runOptions":{"runOn":"folderOpen"}}]}`)}}
+	if findings := scanner.Scan(files, "repo"); len(findings) != 1 || findings[0].Severity != "HIGH" {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+}
+
+func TestIOCDetectsAutomaticTasksSetting(t *testing.T) {
+	scanner, _ := NewScanner([]string{"ioc"})
+	files := []File{{Path: ".vscode/settings.json", Data: []byte(`{"editor.formatOnSave":true,"task.allowAutomaticTasks":true}`)}}
+	findings := scanner.Scan(files, "repo")
+	if len(findings) != 1 || findings[0].Severity != "HIGH" {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+}
+
+func TestIOCDetectsRenamedFontPayload(t *testing.T) {
+	scanner, _ := NewScanner([]string{"ioc"})
+	files := []File{{Path: "public/fonts/fa-solid-600.ttf", Data: []byte(`(function(){require("child_process").execSync("id")})`)}}
+	if findings := scanner.Scan(files, "repo"); len(findings) != 1 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+	realFont := append([]byte{0, 1, 0, 0}, make([]byte, 64)...)
+	files = []File{{Path: "public/fonts/fa-solid-600.ttf", Data: realFont}}
+	if findings := scanner.Scan(files, "repo"); len(findings) != 0 {
+		t.Fatalf("real font flagged: %#v", findings)
+	}
+}
+
+func TestApplyDisablesAutomaticTasks(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".vscode", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"editor.formatOnSave":true,"task.allowAutomaticTasks":true}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := LocalTarget{Root: root}
+	files, err := target.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner, _ := NewScanner([]string{"ioc"})
+	findings := scanner.Scan(files, root)
+	if len(findings) != 1 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+	if _, err := target.Remediate(findings[0], Apply); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := os.ReadFile(path)
+	if automaticTasksEnabled(updated) || !strings.Contains(string(updated), "editor.formatOnSave") {
+		t.Fatalf("settings not fixed in place: %s", updated)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".sentiniel-quarantine", ".vscode", "settings.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGitHubFilesSkipsQuarantineAndExcludedPaths(t *testing.T) {
+	task := []byte(`{"tasks":[{"command":"node ./.x.orc","runOptions":{"runOn":"folderOpen"}}]}`)
+	fake := &fakeGitHub{files: map[string][]byte{
+		".vscode/tasks.json": task,
+		".sentiniel-quarantine/backend/app/routers/public/fonts/fa-brand-400.orc": []byte("payload"),
+		"fixtures/infected/backend/app/routers/public/fonts/fa-solid-600.ttf":     []byte("payload"),
+	}}
+	target := GitHubTarget{Client: &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}, Repo: "o/r", Excludes: []string{"fixtures/infected"}}
+	files, err := target.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != ".vscode/tasks.json" {
+		t.Fatalf("unexpected files: %#v", files)
+	}
+}
+
 func TestDryRunDoesNotChangeLocalFiles(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, ".vscode", "tasks.json")
@@ -167,6 +246,16 @@ func (f *fakeGitHub) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.requests = append(f.requests, req.Method+" "+req.URL.Path)
 	if req.URL.Path == "/repos/o/r" {
 		return jsonResponse(`{"default_branch":"main"}`), nil
+	}
+	if strings.HasPrefix(req.URL.Path, "/repos/o/r/git/trees/") {
+		var entries []string
+		for path := range f.files {
+			entries = append(entries, `{"path":"`+path+`","type":"blob","url":"https://api.github.com/repos/o/r/git/blobs/`+path+`"}`)
+		}
+		return jsonResponse(`{"tree":[` + strings.Join(entries, ",") + `]}`), nil
+	}
+	if strings.HasPrefix(req.URL.Path, "/repos/o/r/git/blobs/") {
+		return jsonResponse(`{"content":"` + base64.StdEncoding.EncodeToString(f.files[strings.TrimPrefix(req.URL.Path, "/repos/o/r/git/blobs/")]) + `"}`), nil
 	}
 	path := strings.TrimPrefix(req.URL.Path, "/repos/o/r/contents/")
 	switch req.Method {

