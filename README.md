@@ -9,9 +9,9 @@ Sentiniel is source-available; commercial use requires a paid licence. See [Lice
 
 ## What it detects
 
-The IOC covers a confirmed propagation pattern: a hidden VS Code `folderOpen` task launches
-obfuscated JavaScript stored under a misleading font filename. Both known filenames and both
-confirmed payload hashes are recognised:
+The `ioc` and `workspace` strategies cover a confirmed propagation pattern: a hidden VS Code
+`folderOpen` task launches obfuscated JavaScript stored under a misleading font filename. Both
+known filenames and both confirmed payload hashes are recognised:
 
 ```text
 backend/app/routers/public/fonts/fa-brand-400.orc
@@ -109,9 +109,11 @@ evidence of cleanliness. It applies to local and remote scans and to remediation
 
 ## Extensibility
 
-Implement `sentiniel.Strategy` and register it in `NewScanner` to add a detector. Target providers
-implement the same `Files()` boundary, so local and remote scans share strategy logic. Fuzzing
-belongs in Go fuzz tests for parsers and strategies; suspicious content must never be executed.
+Implement `sentiniel.Strategy` in its own file and register it in `allStrategies` to add a detector.
+A strategy may also advertise the paths it can inspect, so targets download only those files.
+Target providers keep the same acquisition boundary, so local and remote scans share strategy
+logic. Fuzzing belongs in Go fuzz tests for parsers and strategies; suspicious content must never
+be executed.
 
 ## Automation
 

@@ -72,6 +72,8 @@ infected, and the GitHub token that had push access must be rotated.
   unparseable task files, `task.allowAutomaticTasks`, renamed font payloads, quarantine
   copies, remote `--exclude`, and per-finding apply progress.
 - `v0.5.2` adds `--all-branches`, because the worm pushed a second copy to `develop`.
+- `v0.5.3` moves detection and repair out of the scanner core into strategies (`ioc`, `workspace`,
+  `heuristic`), so adding a new indicator does not touch the scanner or the targets.
 - Credential rotation is still the user's action. The worm had push access, so every
   token, SSH key, and CLI session available on the workstation must be considered
   exposed.
