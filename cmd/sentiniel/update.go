@@ -32,9 +32,6 @@ func runUpdate(args []string) {
 	client, err := sentiniel.NewGitHubClient("")
 	if err != nil {
 		client = &sentiniel.GitHubClient{HTTP: &http.Client{Timeout: 60 * time.Second}}
-	} else {
-		// An interactive update can afford to wait on a slow connection.
-		client.HTTP.Timeout = 60 * time.Second
 	}
 	release, err := client.LatestRelease()
 	if err != nil {

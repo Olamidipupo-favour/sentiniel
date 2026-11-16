@@ -269,14 +269,14 @@ func NewGitHubClient(token string) (*GitHubClient, error) {
 	}
 	for _, candidate := range candidates {
 		if candidate = strings.TrimSpace(candidate); candidate != "" {
-			return &GitHubClient{Token: candidate, HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+			return &GitHubClient{Token: candidate, HTTP: &http.Client{Timeout: 60 * time.Second}}, nil
 		}
 	}
 	// Legacy fallback: reuse an existing gh session when present.
 	if path, err := exec.LookPath("gh"); err == nil {
 		if out, err := exec.Command(path, "auth", "token").Output(); err == nil {
 			if token = strings.TrimSpace(string(out)); token != "" {
-				return &GitHubClient{Token: token, HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+				return &GitHubClient{Token: token, HTTP: &http.Client{Timeout: 60 * time.Second}}, nil
 			}
 		}
 	}
