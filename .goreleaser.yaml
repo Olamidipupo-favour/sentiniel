@@ -19,6 +19,16 @@ archives:
         formats: [zip]
 checksum:
   name_template: checksums.txt
+changelog:
+  abbrev: 7
+  sort: asc
+  format: "{{.Message}} ({{.ShortSHA}})"
+  filters:
+    exclude:
+      - "^Merge "
+      - "^docs"
+      - "^ci"
+      - "^chore"
 release:
   github:
     owner: Olamidipupo-favour

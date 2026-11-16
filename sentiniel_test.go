@@ -420,3 +420,24 @@ type timeoutError struct{}
 func (timeoutError) Error() string   { return "timeout" }
 func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
+
+func TestLatestReleaseIncludesChangelog(t *testing.T) {
+	fake := &releaseGitHub{body: `{"tag_name":"v1.2.3","body":"## Changelog\n* fix the thing","assets":[{"name":"checksums.txt","browser_download_url":"https://example.com/checksums.txt"}]}`}
+	client := &GitHubClient{Token: "t", HTTP: &http.Client{Transport: fake}}
+	release, err := client.LatestRelease()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.Tag != "v1.2.3" || !strings.Contains(release.Notes, "fix the thing") {
+		t.Fatalf("unexpected release: %#v", release)
+	}
+	if len(release.Assets) != 1 || release.Assets[0].Name != "checksums.txt" {
+		t.Fatalf("unexpected assets: %#v", release.Assets)
+	}
+}
+
+type releaseGitHub struct{ body string }
+
+func (f *releaseGitHub) RoundTrip(*http.Request) (*http.Response, error) {
+	return jsonResponse(f.body), nil
+}

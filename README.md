@@ -42,8 +42,8 @@ Full instructions for every platform are in [INSTALLATION.md](INSTALLATION.md).
 # Prebuilt binary from the latest release, or:
 go install github.com/Olamidipupo-favour/sentiniel/cmd/sentiniel@latest
 
-sentiniel update --check   # installed vs latest
-sentiniel update           # verified in-place upgrade
+sentiniel update --check   # installed vs latest, with what changed
+sentiniel update           # verified in-place upgrade, then the changelog
 ```
 
 ## Sign in (no gh required)

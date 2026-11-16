@@ -31,27 +31,33 @@ func runUpdate(args []string) {
 	client, err := sentiniel.NewGitHubClient("")
 	if err != nil {
 		client = &sentiniel.GitHubClient{HTTP: &http.Client{Timeout: 60 * time.Second}}
+	} else {
+		// An interactive update can afford to wait on a slow connection.
+		client.HTTP.Timeout = 60 * time.Second
 	}
-	tag, assets, err := client.LatestRelease()
+	release, err := client.LatestRelease()
 	if err != nil {
 		fatal(err.Error())
 	}
-	latest := strings.TrimPrefix(tag, "v")
+	latest := strings.TrimPrefix(release.Tag, "v")
 	current := strings.TrimPrefix(buildVersion(), "v")
 	if check {
 		fmt.Printf("installed %s, latest %s\n", current, latest)
+		if latest != current {
+			printChangelog(release.Notes)
+		}
 		return
 	}
 	if latest == current && !force {
 		fmt.Printf("sentiniel %s is up to date\n", current)
 		return
 	}
-	archiveName, archiveURL := pickAsset(assets, latest, runtime.GOOS, runtime.GOARCH)
+	archiveName, archiveURL := pickAsset(release.Assets, latest, runtime.GOOS, runtime.GOARCH)
 	if archiveURL == "" {
-		fatal(fmt.Sprintf("release %s has no build for %s/%s", tag, runtime.GOOS, runtime.GOARCH))
+		fatal(fmt.Sprintf("release %s has no build for %s/%s", release.Tag, runtime.GOOS, runtime.GOARCH))
 	}
 	checksumsURL := ""
-	for _, asset := range assets {
+	for _, asset := range release.Assets {
 		if asset.Name == "checksums.txt" {
 			checksumsURL = asset.URL
 		}
@@ -87,6 +93,15 @@ func runUpdate(args []string) {
 		return
 	}
 	fmt.Printf("updated sentiniel %s -> %s (%s)\n", current, latest, path)
+	printChangelog(release.Notes)
+}
+
+// printChangelog shows the release notes GitHub publishes for the version being installed.
+func printChangelog(notes string) {
+	if notes = strings.TrimSpace(notes); notes != "" {
+		fmt.Println()
+		fmt.Println(notes)
+	}
 }
 
 func pickAsset(assets []sentiniel.ReleaseAsset, version, goos, goarch string) (name, url string) {

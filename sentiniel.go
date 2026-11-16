@@ -378,23 +378,31 @@ type ReleaseAsset struct {
 	URL  string
 }
 
-// LatestRelease reports the newest published tag and its assets. It works without a token.
-func (c *GitHubClient) LatestRelease() (string, []ReleaseAsset, error) {
+// Release is a published version: its tag, the changelog shown on GitHub, and its assets.
+type Release struct {
+	Tag    string
+	Notes  string
+	Assets []ReleaseAsset
+}
+
+// LatestRelease reports the newest published release. It works without a token.
+func (c *GitHubClient) LatestRelease() (Release, error) {
 	var rel struct {
 		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
 		Assets  []struct {
 			Name string `json:"name"`
 			URL  string `json:"browser_download_url"`
 		} `json:"assets"`
 	}
 	if err := c.get("https://api.github.com/repos/Olamidipupo-favour/sentiniel/releases/latest", &rel); err != nil {
-		return "", nil, err
+		return Release{}, err
 	}
-	assets := make([]ReleaseAsset, 0, len(rel.Assets))
+	release := Release{Tag: rel.TagName, Notes: rel.Body}
 	for _, asset := range rel.Assets {
-		assets = append(assets, ReleaseAsset{Name: asset.Name, URL: asset.URL})
+		release.Assets = append(release.Assets, ReleaseAsset{Name: asset.Name, URL: asset.URL})
 	}
-	return rel.TagName, assets, nil
+	return release, nil
 }
 
 func (c *GitHubClient) DefaultBranch(repo string) (string, error) {
