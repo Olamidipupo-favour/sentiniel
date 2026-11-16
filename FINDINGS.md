@@ -54,6 +54,17 @@ fixtures/infected/backend/app/routers/public/fonts/fa-*.{eot,svg,ttf,woff,woff2}
   files, so check local clones for an untracked `config.bat` or a `node_modules` directory
   that no `package.json` explains.
 
+### Renamed payload variant
+
+The account-wide rescan on 2026-11-16 found the same campaign using another extension.
+`public/fonts/fa-solid-400.woff2` in `Olamidipupo-favour/AlgoScience` and
+`Olamidipupo-favour/argon` is 37,717 bytes of obfuscated JavaScript that begins with
+`global['!']=` instead of the `wOF2` font header, SHA-256
+`f5638369cf9e169f89429685cb16e41c7081f2319ead0497b4e7cf7b1e34f771`. The accompanying
+`.vscode/settings.json` sets `"task.allowAutomaticTasks": true` and contains a `tasks` block
+with `runOn: folderOpen`. The payload is caught by the font-header check even if its name and
+hash are new, and this hash is now a known indicator.
+
 Evidence preserved outside the repository at
 `/tmp/opencode/sentiniel-worm-evidence/` (payload, both workspace files, commit
 metadata, and a git bundle of both malicious commits). The commits are also kept under

@@ -14,7 +14,21 @@ const (
 	KnownPayloadSHA  = "af747d14f1303252002c14f82ed3c14f1da79e4d8396999b79b26ac135a0c5af"
 	// KnownPayloadSHA2 was recovered from the worm commit that rewrote Sentiniel's own history.
 	KnownPayloadSHA2 = "e20dc2838008cbcc0205d5a992cb3eb11a705d90fcd95582618c91c224b72549"
+	// KnownPayloadSHA3 is the same script renamed to fa-solid-400.woff2.
+	KnownPayloadSHA3 = "f5638369cf9e169f89429685cb16e41c7081f2319ead0497b4e7cf7b1e34f771"
 )
+
+// knownPayloads are the payload hashes recovered from infected repositories.
+var knownPayloads = []string{KnownPayloadSHA, KnownPayloadSHA2, KnownPayloadSHA3}
+
+func knownPayload(hash string) bool {
+	for _, known := range knownPayloads {
+		if hash == known {
+			return true
+		}
+	}
+	return false
+}
 
 // fontHeaders lists the magic bytes each font format starts with.
 var fontHeaders = map[string][][]byte{
@@ -58,9 +72,9 @@ func (IOCStrategy) Match(file File) (Finding, bool) {
 	sum := sha256.Sum256(file.Data)
 	hash := hex.EncodeToString(sum[:])
 	slashPath := filepath.ToSlash(file.Path)
-	if hash == KnownPayloadSHA || hash == KnownPayloadSHA2 || filepath.Base(slashPath) == KnownPayloadName {
+	if knownPayload(hash) || filepath.Base(slashPath) == KnownPayloadName {
 		reasons := []string{"known payload filename"}
-		if hash == KnownPayloadSHA || hash == KnownPayloadSHA2 {
+		if knownPayload(hash) {
 			reasons = append(reasons, "matches known payload SHA-256")
 		}
 		return Finding{Path: file.Path, Strategy: "ioc", Severity: "HIGH", Reasons: reasons, SHA256: hash, Action: "preserve evidence, quarantine the file, rotate credentials if it may have executed"}, true
