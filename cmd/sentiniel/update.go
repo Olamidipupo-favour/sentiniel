@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -125,6 +126,17 @@ func checksumFor(checksums, name string) (string, bool) {
 }
 
 func download(url string) ([]byte, error) {
+	// GitHub's download host times out often enough that a single attempt is not reliable.
+	for attempt := 1; ; attempt++ {
+		data, err := fetch(url)
+		if err == nil || attempt == 3 || !retryableDownload(err) {
+			return data, err
+		}
+		time.Sleep(time.Duration(attempt) * time.Second)
+	}
+}
+
+func fetch(url string) ([]byte, error) {
 	res, err := (&http.Client{Timeout: 120 * time.Second}).Get(url)
 	if err != nil {
 		return nil, err
@@ -134,6 +146,11 @@ func download(url string) ([]byte, error) {
 		return nil, fmt.Errorf("download %s: %s", url, res.Status)
 	}
 	return io.ReadAll(res.Body)
+}
+
+func retryableDownload(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func binaryFrom(archiveName string, data []byte) ([]byte, error) {
