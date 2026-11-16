@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -307,7 +308,26 @@ func (c *GitHubClient) Organizations() ([]string, error) {
 }
 
 func (c *GitHubClient) get(url string, target any) error {
-	return c.do(http.MethodGet, url, nil, target)
+	// Reads are idempotent, so a slow or flaky connection gets a retry instead of silently
+	// dropping a repository from the scan.
+	for attempt := 1; ; attempt++ {
+		err := c.do(http.MethodGet, url, nil, target)
+		if err == nil || attempt == 3 || !transient(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * time.Second)
+	}
+}
+
+// transient reports whether a read is worth retrying: transport failures, timeouts, truncated
+// bodies, and 5xx or rate-limit responses.
+func transient(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	message := err.Error()
+	return strings.Contains(message, "GitHub API 5") || strings.Contains(message, "GitHub API 429")
 }
 
 // do performs an authenticated API call. The response body is read for the API message on failure.

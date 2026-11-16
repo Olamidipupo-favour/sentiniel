@@ -3,9 +3,11 @@ package sentiniel
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -400,3 +402,21 @@ func TestScannerCandidateSelection(t *testing.T) {
 		t.Fatal("heuristic candidate selection is wrong")
 	}
 }
+
+func TestTransientReadErrorsAreRetried(t *testing.T) {
+	if !transient(&url.Error{Op: "Get", URL: "https://api.github.com/x", Err: timeoutError{}}) {
+		t.Fatal("timeout should be retried")
+	}
+	if !transient(errors.New("GitHub API 502 Bad Gateway: bad gateway")) {
+		t.Fatal("5xx should be retried")
+	}
+	if transient(errors.New("GitHub API 404 Not Found: Not Found")) {
+		t.Fatal("got a client error; found should not be retried")
+	}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
